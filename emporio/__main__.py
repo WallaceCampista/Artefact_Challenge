@@ -1,0 +1,33 @@
+"""Command line entry point: `python -m emporio <command>`."""
+from __future__ import annotations
+
+import argparse
+import sys
+
+from .config import load_settings
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m emporio",
+        description="Empório da Música customer service agent.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    chat = sub.add_parser("chat", help="talk to the agent in the terminal")
+    chat.add_argument("--session", help="conversation id to resume (e.g. the customer's phone)")
+    chat.add_argument("--debug", action="store_true", help="show tool calls and latency")
+
+    sub.add_parser("data-report", help="print the data quality issues found and how they are handled")
+    sub.add_parser("eval", help="run the evaluation cases against the configured model")
+    sub.add_parser("examples", help="record the example conversations into examples/")
+
+    args = parser.parse_args(argv)
+    settings = load_settings()
+
+    print(f"'{args.command}' is not implemented yet (model: {settings.llm_model}).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
