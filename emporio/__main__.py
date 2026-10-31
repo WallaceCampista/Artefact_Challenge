@@ -32,6 +32,12 @@ def main(argv: list[str] | None = None) -> int:
         print_report(Store.load(settings.data_dir), settings.now().date())
         return 0
 
+    if args.command == "chat":
+        from .cli import run_chat
+
+        run_chat(settings, args.session, args.debug)
+        return 0
+
     print(f"'{args.command}' is not implemented yet (model: {settings.llm_model}).")
     return 0
 
