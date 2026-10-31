@@ -45,14 +45,20 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_eval(settings, only=args.only)
 
+    if args.command == "examples":
+        from .examples import record_examples
+
+        record_examples(settings)
+        return 0
+
     if args.command == "chat":
         from .cli import run_chat
 
         run_chat(settings, args.session, args.debug)
         return 0
 
-    print(f"'{args.command}' is not implemented yet (model: {settings.llm_model}).")
-    return 0
+    parser.error(f"unknown command {args.command}")
+    return 2
 
 
 if __name__ == "__main__":
