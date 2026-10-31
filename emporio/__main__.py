@@ -18,6 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     chat.add_argument("--session", help="conversation id to resume (e.g. the customer's phone)")
     chat.add_argument("--debug", action="store_true", help="show tool calls and latency")
 
+    sub.add_parser("handoffs", help="list the open handoffs to the human team")
     sub.add_parser("data-report", help="print the data quality issues found and how they are handled")
     sub.add_parser("eval", help="run the evaluation cases against the configured model")
     sub.add_parser("examples", help="record the example conversations into examples/")
@@ -30,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
         from .quality import print_report
 
         print_report(Store.load(settings.data_dir), settings.now().date())
+        return 0
+
+    if args.command == "handoffs":
+        from .cli import print_handoffs
+
+        print_handoffs(settings)
         return 0
 
     if args.command == "chat":
