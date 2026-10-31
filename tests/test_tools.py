@@ -98,3 +98,42 @@ def test_bad_arguments_become_errors_for_the_model(tools):
     assert "erro" in tools.run("detalhes_produto", "{not json").result
     assert "erro" in tools.run("detalhes_produto", "{}").result
     assert "erro" in tools.run("apagar_banco", "{}").result
+
+
+def test_wrong_category_points_to_where_results_are(tools):
+    result = call(tools, "buscar_produtos", categoria="Guitarras", apenas_promocoes=True)
+    assert result["total_encontrado"] == 0
+    assert "Violões (2)" in result["observacao"]
+
+
+def test_hours_tool_resolves_relative_days_and_holidays(store):
+    sunday = datetime(2026, 11, 1, 10, 0, tzinfo=ZoneInfo("America/Campo_Grande"))
+    tools = ToolBox(store, PolicyIndex([]), HandoffDesk(), clock=lambda: sunday)
+    tomorrow = call(tools, "consultar_horario", quando="amanhã")
+    assert tomorrow["dia"].startswith("amanhã (segunda-feira, 02/11/2026)")
+    assert tomorrow["situacao"] == "FECHADA (feriado: Finados)"
+    assert tomorrow["reabre"] == "terça-feira, 03/11 às 09:00"
+    assert call(tools, "consultar_horario", quando="sábado")["situacao"] == "aberta das 09:00 às 13:00"
+    assert "FECHADA" in call(tools, "consultar_horario")["agora"]
+    assert call(tools, "consultar_horario", quando="25/12")["situacao"] == "FECHADA (feriado: Natal)"
+
+
+def test_handoff_mentions_closed_store_only_when_closed(store):
+    sunday = datetime(2026, 11, 1, 10, 0, tzinfo=ZoneInfo("America/Campo_Grande"))
+    tuesday = datetime(2026, 11, 3, 10, 30, tzinfo=ZoneInfo("America/Campo_Grande"))
+    for now, closed in ((sunday, True), (tuesday, False)):
+        tools = ToolBox(store, PolicyIndex([]), HandoffDesk(), clock=lambda now=now: now)
+        result = call(tools, "encaminhar_para_equipe", motivo="reclamacao", resumo="teste")
+        assert ("loja_fechada_agora" in result) is closed
+
+
+def test_order_deadlines_come_with_a_computed_conclusion(store):
+    from datetime import date
+
+    from emporio.deadlines import order_deadlines
+
+    order = next(o for o in store.orders.values() if o.id == 7)
+    late = order_deadlines(order, date(2026, 11, 3))["conclusao_prazos"]
+    assert "TODOS os prazos" in late and "fabricante" in late
+    early = order_deadlines(order, order.estimated_delivery)["conclusao_prazos"]
+    assert "4.1 arrependimento" in early and "TODOS" not in early

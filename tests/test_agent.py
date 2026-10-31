@@ -132,3 +132,69 @@ def test_promotional_price_without_original_is_flagged():
     assert promotion_issues("Está em promoção por R$ 439,20!", evidence)
     assert promotion_issues("De R$ 549,00 por R$ 439,20 (20% de desconto).", evidence) == []
     assert promotion_issues("Temos outros ukuleles.", evidence) == []
+
+
+def test_installments_must_be_grounded_and_placeholders_removed():
+    assert ungrounded_facts("Dá pra parcelar em até 12x.", "até 12x de R$ 183,25") == []
+    assert ungrounded_facts("Dá pra parcelar em até 10x.", "até 12x de R$ 183,25") == ["10x"]
+    client = FakeClient([text_message("Olá [Nome], tudo bem?")])
+    assert Agent(load_settings(), client, FakeTools()).respond([], "oi").text == "Olá, tudo bem?"
+
+
+def test_hours_question_detects_visits_on_a_day():
+    from emporio.agent import hours_question
+
+    assert hours_question("Posso passar aí amanhã de manhã para conhecer os ukuleles?") == "amanha"
+    assert hours_question("Vocês abrem sábado?") == "sabado"
+    assert hours_question("Vocês estão abertos agora?") == "hoje"
+    assert hours_question("A loja abre dia 25/12?") == "25/12"
+    assert hours_question("Qual a previsão do tempo amanhã?") is None
+    assert hours_question("Quanto custa o GD20?") is None
+
+
+def test_hours_are_prefetched_before_the_model_answers():
+    class HoursTools(FakeTools):
+        schemas = FakeTools.schemas + [{"type": "function", "function": {"name": "consultar_horario"}}]
+
+        def run(self, name, arguments):
+            args = arguments if isinstance(arguments, dict) else json.loads(arguments)
+            return ToolCall(name, args, {"situacao": "FECHADA (feriado: Finados)"}, 1.0)
+
+    client = FakeClient([text_message("Amanhã estamos fechados (Finados).")])
+    reply = Agent(load_settings(), client, HoursTools()).respond([], "Posso passar aí amanhã?")
+    assert [c.name for c in reply.tool_calls] == ["consultar_horario"]
+    assert "Finados" in client.requests[0]["messages"][-1]["content"]
+
+
+def test_payment_follow_up_looks_the_product_up_again(store):
+    class StoreTools(FakeTools):
+        def __init__(self):
+            self.store = store
+
+        def run(self, name, arguments):
+            args = arguments if isinstance(arguments, dict) else json.loads(arguments)
+            return ToolCall(name, args, {"pix": "R$ 2.089,05", "parcelamento": "até 12x de R$ 183,25"}, 1.0)
+
+    history = [{"role": "user", "content": "Quanto custa o Takamine GD20?"},
+               {"role": "assistant", "content": "Custa R$ 2.199,00."}]
+    client = FakeClient([text_message("No PIX fica R$ 2.089,05 e parcela em até 12x.")])
+    reply = Agent(load_settings(), client, StoreTools()).respond(history, "E no PIX? Parcela em quantas vezes?")
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [
+        ("detalhes_produto", {"produto": "Takamine GD20 Dreadnought Natural"})]
+    assert reply.ungrounded == []
+
+
+def test_verified_order_becomes_a_session_fact():
+    from emporio.agent import session_facts
+
+    trail = [{"name": "consultar_pedido", "arguments": {"numero_pedido": 7, "email_ou_telefone": "a@b.com"},
+              "result": {"encontrado": True, "pedido": 7, "cliente": "Letícia", "status": "entregue",
+                         "itens": [{"produto": "Shelby SU-21S", "quantidade": 1}],
+                         "conclusao_prazos": "TODOS os prazos terminaram."}},
+             {"name": "consultar_pedido", "arguments": {"numero_pedido": 9, "email_ou_telefone": "x@y.com"},
+              "result": {"encontrado": False}}]
+    facts = session_facts(trail)
+    assert len(facts) == 1 and "pedido 7 de Letícia" in facts[0] and "a@b.com" in facts[0]
+    client = FakeClient([text_message("Certo, Letícia.")])
+    Agent(load_settings(), client, FakeTools()).respond([], "E se tiver defeito?", facts=facts)
+    assert "Já verificado nesta conversa" in client.requests[0]["messages"][-2]["content"]

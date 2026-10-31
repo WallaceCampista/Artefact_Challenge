@@ -29,16 +29,28 @@ def _window(label: str, start: date, days: int, today: date) -> dict:
     return {"regra": label, "situacao": status}
 
 
+def _conclusion(windows: list[dict], today: date) -> str:
+    """The verdict in one sentence, so the model does not have to compare dates."""
+    open_rules = [w["regra"].split(":")[0] for w in windows if w["situacao"].startswith("dentro")]
+    if not open_rules:
+        return (f"Hoje ({today:%d/%m/%Y}) TODOS os prazos da loja já terminaram: não cabe arrependimento, troca "
+                "nem garantia legal. Resta só a garantia do fabricante (8.2), que a loja pode intermediar.")
+    return f"Hoje ({today:%d/%m/%Y}) ainda estão abertos: {', '.join(open_rules)}. Os demais já terminaram."
+
+
 def order_deadlines(order: Order, today: date) -> dict:
     if order.status == "delivered":
         received = order.estimated_delivery or order.order_date
+        windows = [
+            _window("4.1 arrependimento: 7 dias após o recebimento", received, REGRET_DAYS, today),
+            _window("4.3 troca por preferência: 7 dias", received, PREFERENCE_EXCHANGE_DAYS, today),
+            _window("4.2 troca por defeito: 30 dias após a compra", order.order_date, DEFECT_EXCHANGE_DAYS, today),
+            _window("8.1 garantia legal: 90 dias após o recebimento", received, LEGAL_WARRANTY_DAYS, today),
+        ]
         return {
             "recebimento_considerado": f"{received:%d/%m/%Y} (data prevista de entrega; a data real não consta no sistema)",
-            "prazos": [
-                _window("4.1 arrependimento: 7 dias após o recebimento", received, REGRET_DAYS, today),
-                _window("4.3 troca por preferência: 7 dias", received, PREFERENCE_EXCHANGE_DAYS, today),
-                _window("4.2 troca por defeito: 30 dias após a compra", order.order_date, DEFECT_EXCHANGE_DAYS, today),
-                _window("8.1 garantia legal: 90 dias após o recebimento", received, LEGAL_WARRANTY_DAYS, today),
+            "conclusao_prazos": _conclusion(windows, today),
+            "prazos": windows + [
                 {"regra": "8.2 garantia do fabricante",
                  "situacao": "6 meses a 2 anos conforme o certificado do produto; a loja pode intermediar (4.2)"},
             ],

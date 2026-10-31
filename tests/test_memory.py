@@ -29,3 +29,14 @@ def test_handoff_protocols_are_unique_and_persisted(tmp_path):
     second = desk.open("atendimento_humano", "Quer falar com vendedor", None, "s2", date(2026, 11, 3))
     assert first == "EM-20261103-0001" and second == "EM-20261103-0002"
     assert [t["protocol"] for t in desk.list_open()] == [first, second]
+
+
+def test_tool_trail_returns_recent_tool_calls(tmp_path):
+    from emporio.memory import ConversationStore, Database
+    from emporio.tools import ToolCall
+
+    conversations = ConversationStore(Database(tmp_path / "t.db"))
+    conversations.save_exchange("s", "oi", "olá", [])
+    conversations.save_exchange("s", "pedido 7", "achei", [ToolCall("consultar_pedido", {"numero_pedido": 7}, {"encontrado": True}, 1.0)])
+    trail = conversations.tool_trail("s", 6)
+    assert [c["name"] for c in trail] == ["consultar_pedido"] and trail[0]["result"] == {"encontrado": True}
