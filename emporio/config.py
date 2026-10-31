@@ -63,7 +63,7 @@ def load_settings() -> Settings:
         llm_base_url=_env("LLM_BASE_URL", "http://localhost:1234/v1"),
         llm_api_key=_env("LLM_API_KEY", "lm-studio"),
         llm_model=_env("LLM_MODEL", "qwen2.5-7b-instruct"),
-        llm_temperature=float(_env("LLM_TEMPERATURE", "0.2")),
+        llm_temperature=float(_env("LLM_TEMPERATURE", "0")),
         llm_timeout=float(_env("LLM_TIMEOUT", "120")),
         embedding_model=_env("EMBEDDING_MODEL", "text-embedding-qwen3-embedding-0.6b"),
         max_tool_steps=int(_env("MAX_TOOL_STEPS", "6")),

@@ -29,6 +29,9 @@ from .tools import ToolBox, ToolCall
 CALL_AS_TEXT = re.compile(r'"name"\s*:\s*"(?P<name>[a-z_]+)"\s*,\s*"arguments"\s*:\s*(?P<args>\{[^{}]*\})', re.DOTALL)
 MONEY = re.compile(r"R\$\s?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)")
 TRACKING_LIKE = re.compile(r"\bBR[A-Z0-9]{6,}\b")
+PERCENT = re.compile(r"\b(\d+(?:[.,]\d+)?)\s?%")
+PROMO = re.compile(r"(\d+)% de desconto \([^)]*\): de (R\$ [\d.,]+) por (R\$ [\d.,]+)")
+DAYS = re.compile(r"\b(\d+)(?:\s*(?:a|e|-)\s*(\d+))?\s+dias\b")
 GROUNDING_RETRIES = 1
 
 FALLBACK_MESSAGE = (
@@ -82,13 +85,46 @@ def _amounts(text: str) -> set[float]:
     return values
 
 
+def _day_spans(text: str) -> set[tuple[str, ...]]:
+    text = re.sub(r"\(\w+\)", "", text)  # "7 (sete) dias" -> "7 dias"
+    return {tuple(n for n in match if n) for match in DAYS.findall(text)}
+
+
 def ungrounded_facts(answer: str, evidence: str) -> list[str]:
-    """Prices and tracking codes in the answer that do not appear in the evidence text."""
+    """Prices, percentages, day counts and tracking codes in the answer that are not in the evidence."""
     known = _amounts(evidence)
     missing = [f"R$ {v:.2f}".replace(".", ",") for v in sorted(_amounts(answer))
                if not any(abs(v - k) < 0.011 for k in known)]
+    known_percents = {p.replace(",", ".") for p in PERCENT.findall(evidence)}
+    missing += [f"{p}%" for p in PERCENT.findall(answer) if p.replace(",", ".") not in known_percents]
+    known_spans = _day_spans(evidence)
+    known_days = {n for span in known_spans for n in span}
+    for span in _day_spans(answer):
+        if span not in known_spans and not (len(span) == 1 and span[0] in known_days):
+            missing.append(f"{' a '.join(span)} dias")
     missing += [code for code in TRACKING_LIKE.findall(answer) if code not in evidence]
     return missing
+
+
+def _tool_hint(missing: list[str]) -> str:
+    hints = []
+    if any(m.startswith("R$") for m in missing):
+        hints.append("preços: detalhes_produto ou buscar_produtos")
+    if any(m.endswith(("%", "dias")) for m in missing):
+        hints.append("prazos, percentuais e regras: consultar_politicas")
+    if any(m.startswith("BR") for m in missing):
+        hints.append("rastreio: consultar_pedido")
+    return "consulte " + "; ".join(hints)
+
+
+def promotion_issues(answer: str, evidence: str) -> list[str]:
+    """Policy 6.2: a promotional price must come with the original price and the discount."""
+    issues = []
+    for percent, original, final in set(PROMO.findall(evidence)):
+        cited = _amounts(answer)
+        if _amounts(final) <= cited and not (_amounts(original) <= cited and f"{percent}%" in answer):
+            issues.append(f"o preço promocional {final} precisa vir com o preço original {original} e o desconto de {percent}% (regra 6.2)")
+    return issues
 
 
 class Agent:
@@ -145,26 +181,34 @@ class Agent:
             {"role": "system", "content": context_message(self.settings.now())},
             {"role": "user", "content": message},
         ]
-        # Earlier answers were already checked when they were produced, so they count as evidence.
-        conversation_text = " ".join(m["content"] for m in history) + " " + message
+        # Evidence = the curated system prompt, the conversation (earlier answers were checked when they
+        # were produced) and this turn's tool results.
+        conversation_text = " ".join([SYSTEM_PROMPT, *(m["content"] for m in history), message])
 
         text = self._loop(messages, reply)
         for attempt in range(GROUNDING_RETRIES + 1):
-            evidence = conversation_text + " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
-            missing = ungrounded_facts(text, evidence)
-            if not missing or attempt == GROUNDING_RETRIES:
+            results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
+            missing = ungrounded_facts(text, conversation_text + results)
+            issues = promotion_issues(text, results)
+            if not (missing or issues) or attempt == GROUNDING_RETRIES:
                 reply.ungrounded = missing
                 break
             reply.grounding_retries += 1
+            problems = issues + ([f"cita {', '.join(missing)}, que não aparece(m) em nenhum resultado de ferramenta "
+                                  f"desta conversa ({_tool_hint(missing)})"] if missing else [])
             messages += [
                 {"role": "assistant", "content": text},
-                {"role": "system", "content": (
-                    f"Verificação automática: a resposta acima cita {', '.join(missing)}, que não aparece(m) em "
-                    "nenhum resultado de ferramenta desta conversa. Consulte a ferramenta adequada e reescreva a "
-                    "resposta para o cliente usando só dados retornados por ela.")},
+                {"role": "system", "content": "Verificação automática da resposta acima: " + "; ".join(problems)
+                 + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas."},
             ]
             text = self._loop(messages, reply)
 
-        reply.text = text or "Desculpe, não consegui montar uma resposta agora. Pode reformular a pergunta?"
+        text = text or "Desculpe, não consegui montar uma resposta agora. Pode reformular a pergunta?"
+        # Critical information is guaranteed by code, not left to the model: the handoff protocol.
+        for call in reply.tool_calls:
+            protocol = call.result.get("protocolo") if call.name == "encaminhar_para_equipe" else None
+            if protocol and protocol not in text:
+                text += f"\n\nSeu protocolo de atendimento é {protocol}. Nossa equipe retorna em até 24 horas úteis."
+        reply.text = text
         reply.latency_s = time.perf_counter() - started
         return reply

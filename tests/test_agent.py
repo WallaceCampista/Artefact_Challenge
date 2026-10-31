@@ -105,3 +105,30 @@ def test_invented_price_triggers_one_grounded_retry():
     assert reply.text == "O Takamine GD20 custa R$ 2.199,00."
     warning = client.requests[1]["messages"][-1]
     assert warning["role"] == "system" and "R$ 1999,00" in warning["content"]
+
+
+def test_invented_percentages_and_deadlines_are_detected():
+    evidence = '"PAC (Correios) | 5 a 12 dias úteis" "devolução em até 7 (sete) dias" "18% de desconto"'
+    assert ungrounded_facts("Pelo PAC leva de 5 a 12 dias úteis; arrependimento em 7 dias.", evidence) == []
+    assert ungrounded_facts("Tem 18% de desconto.", evidence) == []
+    assert ungrounded_facts("Chega em 2 a 3 dias úteis com 10% off.", evidence) == ["10%", "2 a 3 dias"]
+
+
+def test_handoff_protocol_is_always_in_the_answer():
+    class HandoffTools(FakeTools):
+        def run(self, name, arguments):
+            return ToolCall(name, json.loads(arguments), {"protocolo": "EM-20261103-0001"}, 1.0)
+
+    client = FakeClient([tool_message("encaminhar_para_equipe", {"motivo": "reclamacao", "resumo": "risco"}),
+                         text_message("Sua reclamação foi encaminhada.")])
+    reply = Agent(load_settings(), client, HandoffTools()).respond([], "Quero reclamar")
+    assert "EM-20261103-0001" in reply.text
+
+
+def test_promotional_price_without_original_is_flagged():
+    from emporio.agent import promotion_issues
+
+    evidence = '"promocao": "20% de desconto (Desconto Exclusivo): de R$ 549,00 por R$ 439,20"'
+    assert promotion_issues("Está em promoção por R$ 439,20!", evidence)
+    assert promotion_issues("De R$ 549,00 por R$ 439,20 (20% de desconto).", evidence) == []
+    assert promotion_issues("Temos outros ukuleles.", evidence) == []

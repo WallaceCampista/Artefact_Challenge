@@ -34,7 +34,8 @@ def tool_schemas(category_names: list[str]) -> list[dict]:
                 "name": "buscar_produtos",
                 "description": (
                     "Busca instrumentos no catálogo: opções por categoria, faixa de preço, marca, "
-                    "características ou promoções. Devolve preço, promoção e disponibilidade."
+                    "características ou promoções, e responde se a loja tem um tipo de instrumento. "
+                    "Para um modelo específico, prefira detalhes_produto."
                 ),
                 "parameters": {
                     "type": "object",
@@ -87,7 +88,8 @@ def tool_schemas(category_names: list[str]) -> list[dict]:
                 "name": "consultar_politicas",
                 "description": (
                     "Consulta o manual da loja: trocas, devoluções, arrependimento, garantia, frete e prazos de "
-                    "entrega, formas de pagamento, parcelamento, promoções, privacidade."
+                    "entrega, formas de pagamento, parcelamento, regras de promoções, privacidade. O manual NÃO diz "
+                    "preços, estoque nem quais promoções estão ativas: para isso use as ferramentas de produto."
                 ),
                 "parameters": {
                     "type": "object",
@@ -200,6 +202,18 @@ class ToolBox:
             item["disponibilidade"] += f" (últimas {product.stock} unidades)"
         return item
 
+    def _named(self, product: Product) -> dict:
+        item = self._summary(product)
+        expired = [f"{x.description} ({x.discount_percent:g}%)" for x in product.promotions if not x.is_active]
+        if expired:
+            item["promocoes_encerradas"] = expired
+        if not product.sellable:
+            item["alternativas"] = [self._summary(x) for x in self.store.similar_products(product)]
+        item["observacao"] = ("Este é o modelo que o cliente citou. Informe a disponibilidade dele"
+                              + (" e diga que as promoções encerradas não valem mais" if expired else "")
+                              + (" e ofereça as alternativas." if not product.sellable else "."))
+        return item
+
     # ------------------------------------------------------------------ tools
     def buscar_produtos(self, termo: str | None = None, categoria: str | None = None,
                         preco_maximo: float | None = None, preco_minimo: float | None = None,
@@ -221,17 +235,25 @@ class ToolBox:
             }
         filters = dict(category=category, min_price=preco_minimo, max_price=preco_maximo, only_promotions=apenas_promocoes)
         found = self.store.search_products(term=termo, **filters)
+        # The customer may name a specific model that the search hides (out of stock, discontinued,
+        # outside the price/promotion filter). Small models then answer "not found"; return it explicitly.
+        named = self.store.find_product(termo) if termo else []
+        named = named[0] if len(named) == 1 and named[0] not in found else None
         note = None
         if not found and termo:
             found = self.store.search_products(**filters)
-            if found:
+            if found and not named:
                 note = f"Nenhum produto corresponde a '{termo}'; abaixo, os resultados sem esse termo."
-        if not found:
+        if named:
+            result = {"produto_citado": self._named(named)}
+            if not found:
+                return result
+        elif not found:
             return {"total_encontrado": 0, "observacao": "Nenhum produto disponível com esses filtros."}
-        result = {
-            "total_encontrado": len(found),
-            "produtos": [self._summary(p) for p in found[:MAX_RESULTS]],
-        }
+        else:
+            result = {}
+        result["total_encontrado"] = len(found)
+        result["produtos"] = [self._summary(p) for p in found[:MAX_RESULTS]]
         notes = [note] if note else []
         if len(found) > MAX_RESULTS:
             notes.append(f"Mostrando {MAX_RESULTS} de {len(found)} (os mais relevantes ou mais baratos); "
