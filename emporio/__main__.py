@@ -20,7 +20,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("handoffs", help="list the open handoffs to the human team")
     sub.add_parser("data-report", help="print the data quality issues found and how they are handled")
-    sub.add_parser("eval", help="run the evaluation cases against the configured model")
+    evaluate = sub.add_parser("eval", help="run the evaluation cases against the configured model")
+    evaluate.add_argument("--only", help="run a single case by id")
     sub.add_parser("examples", help="record the example conversations into examples/")
 
     args = parser.parse_args(argv)
@@ -38,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
 
         print_handoffs(settings)
         return 0
+
+    if args.command == "eval":
+        from .evals import run_eval
+
+        return run_eval(settings, only=args.only)
 
     if args.command == "chat":
         from .cli import run_chat
