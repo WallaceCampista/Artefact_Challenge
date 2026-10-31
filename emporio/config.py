@@ -65,7 +65,7 @@ def load_settings() -> Settings:
         llm_model=_env("LLM_MODEL", "qwen2.5-7b-instruct"),
         llm_temperature=float(_env("LLM_TEMPERATURE", "0.2")),
         llm_timeout=float(_env("LLM_TIMEOUT", "120")),
-        embedding_model=_env("EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v1.5@q8_0"),
+        embedding_model=_env("EMBEDDING_MODEL", "text-embedding-qwen3-embedding-0.6b"),
         max_tool_steps=int(_env("MAX_TOOL_STEPS", "6")),
         history_turns=int(_env("HISTORY_TURNS", "6")),
         timezone=_env("STORE_TIMEZONE", "America/Campo_Grande"),
