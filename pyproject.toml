@@ -1,0 +1,8 @@
+[project]
+name = "emporio-agent"
+version = "0.1.0"
+description = "Customer service agent for Empório da Música (Artefact AI Engineer challenge)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
