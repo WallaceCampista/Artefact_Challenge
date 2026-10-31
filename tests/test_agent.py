@@ -69,3 +69,39 @@ def test_step_budget_forces_a_final_answer_without_tools(monkeypatch):
     reply = Agent(load_settings(), client, FakeTools()).respond([], "?")
     assert reply.text == "Resposta final."
     assert "tools" not in client.requests[-1]
+
+
+# --------------------------------------------------------------------------- defences
+from emporio.agent import calls_from_text, ungrounded_facts
+
+TOOLS = {"consultar_pedido", "detalhes_produto"}
+
+
+def test_broken_tool_call_text_is_recovered():
+    # Seen with qwen2.5-7b in LM Studio: missing opening tag and a stray token.
+    content = 'Ronaldo\n{"name": "consultar_pedido", "arguments": {"numero_pedido": 8, "email_ou_telefone": "a@b.com"}}\n</tool_call>'
+    calls = calls_from_text(content, TOOLS)
+    assert len(calls) == 1
+    assert json.loads(calls[0]["function"]["arguments"]) == {"numero_pedido": 8, "email_ou_telefone": "a@b.com"}
+    assert calls_from_text('{"name": "rm_rf", "arguments": {}}', TOOLS) == []
+
+
+def test_ungrounded_prices_and_tracking_codes_are_detected():
+    evidence = '{"preco_final": "R$ 2.199,00", "pix": "R$ 2.089,05"} cliente: até R$1000'
+    assert ungrounded_facts("Custa R$ 2.199,00 ou R$ 2.089,05 no PIX.", evidence) == []
+    assert ungrounded_facts("Temos opções até R$ 1.000.", evidence) == []
+    assert ungrounded_facts("Custa R$ 1.999,00.", evidence) == ["R$ 1999,00"]
+    assert ungrounded_facts("Seu rastreio é BR4567890.", evidence) == ["BR4567890"]
+
+
+def test_invented_price_triggers_one_grounded_retry():
+    client = FakeClient([
+        text_message("O Takamine GD20 custa R$ 1.999,00."),  # no tool, invented
+        tool_message("detalhes_produto", {"produto": "Takamine GD20"}),
+        text_message("O Takamine GD20 custa R$ 2.199,00."),
+    ])
+    reply = Agent(load_settings(), client, FakeTools()).respond([], "Quanto custa o Takamine GD20?")
+    assert reply.grounding_retries == 1 and reply.ungrounded == []
+    assert reply.text == "O Takamine GD20 custa R$ 2.199,00."
+    warning = client.requests[1]["messages"][-1]
+    assert warning["role"] == "system" and "R$ 1999,00" in warning["content"]
