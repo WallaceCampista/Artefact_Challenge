@@ -16,7 +16,7 @@ import json
 import time
 from pathlib import Path
 
-from .agent import Agent, ModelUnavailable
+from .agent import Agent, ModelUnavailable, session_facts
 from .app import build_agent
 from .config import PROJECT_ROOT, Settings
 from .policies import PolicyIndex
@@ -84,11 +84,13 @@ def run_cases(settings: Settings, only: str | None = None) -> list[dict]:
             agents[now] = build_agent(dataclasses.replace(settings, reference_datetime=now))
         agent = agents[now]
         history: list[dict] = []
+        trail: list = []
         started = time.perf_counter()
         try:
-            for turn in case["turns"]:
-                reply = agent.respond(history, turn, session_id=f"eval-{case['id']}")
+            for turn in case["turns"]:  # same flow as ChatService.send, without the database
+                reply = agent.respond(history, turn, session_id=f"eval-{case['id']}", facts=session_facts(trail))
                 history += [{"role": "user", "content": turn}, {"role": "assistant", "content": reply.text}]
+                trail += reply.tool_calls
         except ModelUnavailable as exc:
             raise SystemExit(f"model unavailable: {exc}") from exc
         tools_used = [c.name for c in reply.tool_calls]

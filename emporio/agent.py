@@ -22,6 +22,7 @@ import openai
 
 from .config import Settings
 from .prompts import SYSTEM_PROMPT, context_message
+from .text import normalize
 from .tools import ToolBox, ToolCall
 
 # Small local models sometimes write the call as text (sometimes with a broken <tool_call> tag)
@@ -30,6 +31,8 @@ CALL_AS_TEXT = re.compile(r'"name"\s*:\s*"(?P<name>[a-z_]+)"\s*,\s*"arguments"\s
 MONEY = re.compile(r"R\$\s?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)")
 TRACKING_LIKE = re.compile(r"\bBR[A-Z0-9]{6,}\b")
 PERCENT = re.compile(r"\b(\d+(?:[.,]\d+)?)\s?%")
+INSTALLMENTS = re.compile(r"\b(\d{1,2})\s?x\b", re.IGNORECASE)
+PLACEHOLDER = re.compile(r"\s*\[(?:nome|nome do cliente|cliente|seu nome)\]", re.IGNORECASE)
 PROMO = re.compile(r"(\d+)% de desconto \([^)]*\): de (R\$ [\d.,]+) por (R\$ [\d.,]+)")
 DAYS = re.compile(r"\b(\d+)(?:\s*(?:a|e|-)\s*(\d+))?\s+dias\b")
 GROUNDING_RETRIES = 1
@@ -102,14 +105,41 @@ def ungrounded_facts(answer: str, evidence: str) -> list[str]:
     for span in _day_spans(answer):
         if span not in known_spans and not (len(span) == 1 and span[0] in known_days):
             missing.append(f"{' a '.join(span)} dias")
+    known_installments = set(INSTALLMENTS.findall(evidence))
+    missing += [f"{n}x" for n in INSTALLMENTS.findall(answer) if n not in known_installments]
     missing += [code for code in TRACKING_LIKE.findall(answer) if code not in evidence]
     return missing
+
+
+DAY_WORDS = ("depois de amanha", "amanha", "hoje", "agora", "domingo", "segunda", "terca", "quarta", "quinta",
+             "sexta", "sabado")
+VISIT_INTENT = re.compile(r"\b(?:abert\w*|abre|abrem|abrir|fecha\w*|funciona\w*|horario\w*|passar|visitar|"
+                          r"ir (?:a|na|ate|ai|la))\b")
+PAYMENT_INTENT = re.compile(r"\b(?:pix|parcel\w*|vezes|cartao|boleto|a vista|pagar|pagando|pagamento)\b")
+DATE = re.compile(r"\b\d{1,2}/\d{1,2}\b")
+
+
+def hours_question(message: str) -> str | None:
+    """The day the customer asks about when the message is about visiting/opening on a day
+    ("posso passar amanhã?", "vocês abrem sábado?", "abertos agora?"), else None."""
+    text = normalize(message)
+    if not VISIT_INTENT.search(text):
+        return None
+    date_match = DATE.search(message)
+    if date_match:
+        return date_match.group(0)
+    for word in DAY_WORDS:
+        if re.search(rf"\b{word}\b", text):
+            return "hoje" if word == "agora" else word
+    return None
 
 
 def _tool_hint(missing: list[str]) -> str:
     hints = []
     if any(m.startswith("R$") for m in missing):
         hints.append("preços: detalhes_produto ou buscar_produtos")
+    if any(m.endswith("x") for m in missing):
+        hints.append("parcelas: detalhes_produto")
     if any(m.endswith(("%", "dias")) for m in missing):
         hints.append("prazos, percentuais e regras: consultar_politicas")
     if any(m.startswith("BR") for m in missing):
@@ -125,6 +155,21 @@ def promotion_issues(answer: str, evidence: str) -> list[str]:
         if _amounts(final) <= cited and not (_amounts(original) <= cited and f"{percent}%" in answer):
             issues.append(f"o preço promocional {final} precisa vir com o preço original {original} e o desconto de {percent}% (regra 6.2)")
     return issues
+
+
+def session_facts(calls) -> list[str]:
+    """Facts established by tools in earlier turns of this session. Tool results are not replayed
+    to the model, so without this it asks again for an order number it has already verified."""
+    facts: dict[str, str] = {}
+    for call in calls:
+        name, args, result = ((call["name"], call["arguments"], call["result"]) if isinstance(call, dict)
+                              else (call.name, call.arguments, call.result))
+        if name == "consultar_pedido" and result.get("encontrado"):
+            items = ", ".join(i["produto"] for i in result.get("itens", []))
+            facts[f"order-{result['pedido']}"] = (
+                f"pedido {result['pedido']} de {result.get('cliente')}, contato {args.get('email_ou_telefone')} "
+                f"conferido ({items}; status {result.get('status')}). {result.get('conclusao_prazos', '')}".strip())
+    return list(facts.values())
 
 
 class Agent:
@@ -170,20 +215,63 @@ class Agent:
         # Step budget exhausted: answer with what was gathered, no more tools.
         return (self._complete(messages, with_tools=False, reply=reply).content or "").strip()
 
-    def respond(self, history: list[dict], message: str, session_id: str | None = None) -> Reply:
-        """Answers one user message. `history` holds previous {"role", "content"} text turns."""
+    def _prefetch(self, messages: list[dict], reply: Reply, name: str, arguments: dict) -> None:
+        """Runs a tool on the model's behalf and adds it to the conversation as if the model had
+        called it. Used where routing is narrow and the cost of a wrong answer is high."""
+        executed = self.tools.run(name, arguments)
+        reply.tool_calls.append(executed)
+        call_id = f"auto-{len(reply.tool_calls)}"
+        messages += [
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": call_id, "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+            }]},
+            {"role": "tool", "tool_call_id": call_id, "content": json.dumps(executed.result, ensure_ascii=False)},
+        ]
+
+    def _product_in_focus(self, history: list[dict], message: str):
+        """The single product named in this message or, failing that, in the latest user turns."""
+        store = getattr(self.tools, "store", None)
+        if store is None:
+            return None
+        recent = [m["content"] for m in reversed(history) if m["role"] == "user"][:3]
+        for text in [message, *recent]:
+            found = store.find_product(text)
+            if found:
+                return found[0] if len(found) == 1 else None
+        return None
+
+    def respond(self, history: list[dict], message: str, session_id: str | None = None,
+                facts: list[str] | None = None) -> Reply:
+        """Answers one user message. `history` holds previous {"role", "content"} text turns;
+        `facts` are what tools already established in this session (see session_facts)."""
         started = time.perf_counter()
         self.tools.session_id = session_id
         reply = Reply(text="")
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},  # static: cacheable prefix
             *history,
-            {"role": "system", "content": context_message(self.settings.now())},
+            # Volatile context as its own message. Tried inside the user turn: better at dates,
+            # but the model then called fewer tools (evals 22/23 -> 18/23), so it stays here.
+            {"role": "system", "content": context_message(self.settings.now()) + (
+                "\nJá verificado nesta conversa (não peça esses dados de novo): " + " | ".join(facts) if facts else "")},
             {"role": "user", "content": message},
         ]
         # Evidence = the curated system prompt, the conversation (earlier answers were checked when they
         # were produced) and this turn's tool results.
         conversation_text = " ".join([SYSTEM_PROMPT, *(m["content"] for m in history), message])
+
+        # Opening hours on a given day: a 7B model often ignores the calendar in the context and
+        # answers from the weekly table (e.g. "come tomorrow 09-13" on a holiday). Asked in code.
+        day = hours_question(message)
+        if day and "consultar_horario" in self.tool_names:
+            self._prefetch(messages, reply, "consultar_horario", {"quando": day})
+        # Payment of a product already discussed ("e no PIX, fica quanto?"): tool results are not
+        # replayed between turns, so without a new lookup the model guesses installments.
+        if PAYMENT_INTENT.search(normalize(message)):
+            product = self._product_in_focus(history, message)
+            if product is not None:
+                self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name})
 
         text = self._loop(messages, reply)
         for attempt in range(GROUNDING_RETRIES + 1):
@@ -201,9 +289,13 @@ class Agent:
                 {"role": "system", "content": "Verificação automática da resposta acima: " + "; ".join(problems)
                  + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas."},
             ]
+            # Invented deadlines/percentages almost always mean the manual was not read: read it for the model.
+            used = {c.name for c in reply.tool_calls}
+            if any(m.endswith(("%", "dias")) for m in missing) and "consultar_politicas" not in used:
+                self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message})
             text = self._loop(messages, reply)
 
-        text = text or "Desculpe, não consegui montar uma resposta agora. Pode reformular a pergunta?"
+        text = PLACEHOLDER.sub("", text).strip() or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
         # Critical information is guaranteed by code, not left to the model: the handoff protocol.
         for call in reply.tool_calls:
             protocol = call.result.get("protocolo") if call.name == "encaminhar_para_equipe" else None

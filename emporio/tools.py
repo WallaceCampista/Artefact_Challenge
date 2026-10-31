@@ -13,14 +13,15 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable
 
 from .catalog import AVAILABILITY, ORDER_STATUS, Product, Store, describe_payment_method
 from .deadlines import order_deadlines
+from .hours import WEEKDAYS_PT, holiday_name, hours_on, store_status
 from .payments import payment_options
 from .policies import PolicyIndex
-from .text import format_brl
+from .text import format_brl, normalize
 
 MAX_RESULTS = 10
 HANDOFF_REASONS = ["reclamacao", "devolucao_ou_troca", "pedido_atrasado", "atendimento_humano", "outro"]
@@ -41,7 +42,10 @@ def tool_schemas(category_names: list[str]) -> list[dict]:
                     "type": "object",
                     "properties": {
                         "termo": {"type": "string", "description": "Palavras-chave, ex.: 'eletroacústico aço', 'iniciante', 'Yamaha'."},
-                        "categoria": {"type": "string", "enum": category_names},
+                        "categoria": {
+                            "type": "string", "enum": category_names,
+                            "description": "Violões = violão (clássico, folk, eletroacústico); Guitarras = guitarra elétrica.",
+                        },
                         "preco_maximo": {"type": "number", "description": "Preço máximo em reais."},
                         "preco_minimo": {"type": "number", "description": "Preço mínimo em reais."},
                         "apenas_promocoes": {"type": "boolean", "description": "Só produtos com promoção ativa."},
@@ -101,6 +105,20 @@ def tool_schemas(category_names: list[str]) -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "consultar_horario",
+                "description": (
+                    "Diz se a loja está aberta agora ou se abre em um dia específico (hoje, amanhã, um dia da "
+                    "semana ou uma data), já considerando feriados, e quando reabre."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"quando": {"type": "string", "description": "Ex.: 'hoje', 'amanhã', 'sábado', '25/12'."}},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "encaminhar_para_equipe",
                 "description": (
                     "Abre um chamado para a equipe humana: reclamação, devolução ou troca que o cliente quer "
@@ -153,6 +171,7 @@ class ToolBox:
             "detalhes_produto": self.detalhes_produto,
             "consultar_pedido": self.consultar_pedido,
             "consultar_politicas": self.consultar_politicas,
+            "consultar_horario": self.consultar_horario,
             "encaminhar_para_equipe": self.encaminhar_para_equipe,
         }
 
@@ -209,7 +228,7 @@ class ToolBox:
             item["promocoes_encerradas"] = expired
         if not product.sellable:
             item["alternativas"] = [self._summary(x) for x in self.store.similar_products(product)]
-        item["observacao"] = ("Este é o modelo que o cliente citou. Informe a disponibilidade dele"
+        item["observacao"] = ("Este é o modelo que o cliente citou. Informe o preço atual e a disponibilidade dele"
                               + (" e diga que as promoções encerradas não valem mais" if expired else "")
                               + (" e ofereça as alternativas." if not product.sellable else "."))
         return item
@@ -239,26 +258,39 @@ class ToolBox:
         # outside the price/promotion filter). Small models then answer "not found"; return it explicitly.
         named = self.store.find_product(termo) if termo else []
         named = named[0] if len(named) == 1 and named[0] not in found else None
+        if named:
+            # A named model is a lookup, not a search: a list of other products next to it made
+            # the model answer about the list and skip the named product's price or status.
+            return {"produto_citado": self._named(named)}
         note = None
         if not found and termo:
             found = self.store.search_products(**filters)
-            if found and not named:
+            if found:
                 note = f"Nenhum produto corresponde a '{termo}'; abaixo, os resultados sem esse termo."
-        if named:
-            result = {"produto_citado": self._named(named)}
-            if not found:
-                return result
-        elif not found:
-            return {"total_encontrado": 0, "observacao": "Nenhum produto disponível com esses filtros."}
-        else:
-            result = {}
-        result["total_encontrado"] = len(found)
+        if not found:
+            result = {"total_encontrado": 0, "observacao": "Nenhum produto disponível com esses filtros."}
+            if category is not None:  # maybe the wrong category ("violão" sent as Guitarras)
+                elsewhere = self.store.search_products(term=termo, **{**filters, "category": None})
+                counts: dict[str, int] = {}
+                for p in elsewhere:
+                    counts[p.category.name] = counts.get(p.category.name, 0) + 1
+                if counts:
+                    listed = ", ".join(f"{name} ({n})" for name, n in counts.items())
+                    result["observacao"] += (f" Com os mesmos filtros há produtos em: {listed}. Confira se a categoria "
+                                             "está certa (violão = Violões; guitarra elétrica = Guitarras).")
+            return result
+        result = {"total_encontrado": len(found)}
         result["produtos"] = [self._summary(p) for p in found[:MAX_RESULTS]]
         notes = [note] if note else []
         if len(found) > MAX_RESULTS:
             notes.append(f"Mostrando {MAX_RESULTS} de {len(found)} (os mais relevantes ou mais baratos); "
                          "ofereça refinar a busca.")
-        notes.append("Preços já com promoção, quando houver. PIX dá 5% de desconto só em produtos sem promoção.")
+        on_sale = sum("promocao" in item for item in result["produtos"])
+        if on_sale:  # the old generic "prices include promotions" note made the model call every price promotional
+            notes.append(f"{on_sale} destes produtos estão em promoção (campo promocao); os demais estão a preço de tabela.")
+        else:
+            notes.append("Nenhum destes produtos está em promoção: são preços de tabela.")
+        notes.append("PIX dá 5% de desconto só em produtos sem promoção.")
         result["observacao"] = " ".join(notes)
         return result
 
@@ -364,12 +396,58 @@ class ToolBox:
                           "confirmar com a equipe.",
         }
 
+    def _resolve_day(self, quando: str) -> date:
+        today = self.today
+        match = re.search(r"\b(\d{1,2})/(\d{1,2})\b", quando or "")  # before normalize() drops the "/"
+        text = normalize(quando or "hoje")
+        if "depois de amanha" in text:
+            return today + timedelta(days=2)
+        if "amanha" in text:
+            return today + timedelta(days=1)
+        if match:
+            day = date(today.year, int(match.group(2)), int(match.group(1)))
+            return day if day >= today else day.replace(year=today.year + 1)
+        for index, name in enumerate(WEEKDAYS_PT):
+            if normalize(name.split("-")[0]) in text.split():
+                return today + timedelta(days=(index - today.weekday()) % 7)
+        return today
+
+    def consultar_horario(self, quando: str = "hoje", **_ignored) -> dict:
+        now = self.clock()
+        try:
+            day = self._resolve_day(str(quando))
+        except ValueError:
+            raise ValueError(f"data inválida: {quando}")
+        hours = hours_on(day)
+        label = f"{WEEKDAYS_PT[day.weekday()]}, {day:%d/%m/%Y}"
+        if day == now.date():
+            label = f"hoje ({label})"
+        elif day == now.date() + timedelta(days=1):
+            label = f"amanhã ({label})"
+        result = {"dia": label}
+        if hours:
+            result["situacao"] = f"aberta das {hours[0]:%H:%M} às {hours[1]:%H:%M}"
+        else:
+            holiday = holiday_name(day)
+            result["situacao"] = "FECHADA" + (f" (feriado: {holiday})" if holiday else " (domingo)")
+            after = datetime.combine(day, datetime.max.time(), now.tzinfo)
+            reopening = store_status(after).next_opening
+            result["reabre"] = f"{WEEKDAYS_PT[reopening.weekday()]}, {reopening:%d/%m} às {reopening:%H:%M}"
+        if day == now.date():
+            result["agora"] = store_status(now).describe(now)
+        return result
+
     def encaminhar_para_equipe(self, motivo: str, resumo: str, contato: str | None = None, **_ignored) -> dict:
         if motivo not in HANDOFF_REASONS:
             motivo = "outro"
         protocol = self.desk.open(motivo, str(resumo), contato, self.session_id, self.today)
-        return {
+        result = {
             "protocolo": protocol,
             "prazo_de_retorno": "até 24 horas úteis (regra 7.3)",
-            "observacao": "Informe o protocolo e o prazo ao cliente. Se a loja estiver fechada, diga quando reabre.",
+            "observacao": "Informe o protocolo e o prazo ao cliente.",
         }
+        now = self.clock()
+        status = store_status(now)
+        if not status.is_open:  # decided here; the model misread a conditional instruction
+            result["loja_fechada_agora"] = status.describe(now)
+        return result

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from .agent import Agent, Reply
+from .agent import Agent, Reply, session_facts
 from .catalog import Store
 from .config import Settings
 from .llm import Embedder, make_client
@@ -40,7 +40,9 @@ class ChatService:
         return self.agent.tools.policies.mode
 
     def send(self, session_id: str, text: str) -> Reply:
-        history = self.conversations.history(session_id, self.settings.history_turns)
-        reply = self.agent.respond(history, text, session_id=session_id)
+        turns = self.settings.history_turns
+        history = self.conversations.history(session_id, turns)
+        facts = session_facts(self.conversations.tool_trail(session_id, turns))
+        reply = self.agent.respond(history, text, session_id=session_id, facts=facts)
         self.conversations.save_exchange(session_id, text, reply.text, reply.tool_calls)
         return reply

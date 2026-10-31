@@ -73,7 +73,10 @@
     "expir",
     "já passou",
     "fora do prazo",
-    "venceu"
+    "fora desse prazo",
+    "venceu",
+    "terminaram",
+    "terminou"
    ]
   ],
   "must_not_include": [
@@ -115,6 +118,22 @@
     "não vale",
     "não é mais",
     "não está mais"
+   ]
+  ]
+ },
+ {
+  "id": "promotion_by_category",
+  "group": "price",
+  "turns": [
+   "Tem algum violão em promoção?"
+  ],
+  "expect_tools": [
+   "buscar_produtos"
+  ],
+  "must_include": [
+   [
+    "Crafter",
+    "Taylor"
    ]
   ]
  },
@@ -189,7 +208,10 @@
   ],
   "must_include": [
    "1.234,05",
-   "12x"
+   [
+    "12x",
+    "12 vezes"
+   ]
   ]
  },
  {
@@ -323,6 +345,25 @@
     "terça",
     "03/11"
    ]
+  ]
+ },
+ {
+  "id": "holiday_after_chat",
+  "group": "store info",
+  "now": "2026-11-01T10:00:00",
+  "turns": [
+   "Oi! Qual o endereço da loja?",
+   "Posso passar aí amanhã de manhã para conhecer os ukuleles?"
+  ],
+  "must_include": [
+   [
+    "Finados",
+    "feriado",
+    "fechad"
+   ]
+  ],
+  "must_not_include": [
+   "13:00"
   ]
  },
  {

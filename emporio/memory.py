@@ -68,6 +68,14 @@ class ConversationStore:
             messages.pop(0)
         return messages
 
+    def tool_trail(self, session_id: str, turns: int) -> list[dict]:
+        """Tool calls of the last `turns` answers, oldest first (for session facts)."""
+        rows = self.db.conn.execute(
+            "SELECT tool_calls FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT ?",
+            (session_id, turns),
+        ).fetchall()
+        return [call for r in reversed(rows) if r["tool_calls"] for call in json.loads(r["tool_calls"])]
+
     def count(self, session_id: str) -> int:
         return self.db.conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
 
