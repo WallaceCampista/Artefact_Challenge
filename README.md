@@ -195,6 +195,20 @@ The challenge has two kinds of knowledge:
 - **Reciprocal Rank Fusion** (k = 60) merges the two rankings without tuning weights. Section titles count twice. If the embedding call fails, search falls back to BM25 automatically.
 - **Model choice was measured, not assumed.** I first used `nomic-embed-text`. On the 22 Portuguese questions in [`evals/policy_retrieval.json`](evals/policy_retrieval.json) it made results *worse* than BM25 alone (hit@3 19/22 vs 20/22), because it is English-centric. Switching to the multilingual `Qwen3-Embedding-0.6B` gave hit@3 **21/22**.
 
+### Prompt strategy
+
+The prompt lives in [`emporio/prompts.py`](emporio/prompts.py). It is in Portuguese, the language of the conversation, so the model does not translate rules on the fly.
+
+- **One static system prompt** (~3,400 characters) with five blocks:
+  - **Persona:** Tom, friendly but professional, short WhatsApp-style messages.
+  - **Store card:** address, phone, weekly hours, "instruments only". These facts never change, so they cost no tool call.
+  - **Routing table:** "a specific model → `detalhes_produto`", "store rules → `consultar_politicas`", etc.
+  - **Step-by-step return flow.**
+  - **Hard rules:** never state a price, stock level, deadline or rule without a tool result from this conversation.
+- **Volatile context in its own short message.** Date, time, open/closed status and the next three days, holidays included, go just before the customer's message. The system prompt stays byte-identical, so the server reuses its cache.
+- **Instructions at the point of use.** Tool descriptions double as routing hints, e.g. "the manual has no prices". Tool results carry an `observacao` field with the instruction for that result, e.g. "this model was discontinued: say so and offer the alternatives". A small model follows an instruction next to the data more reliably than a rule far up in the system prompt.
+- **No few-shot examples.** They would cost context in an 8k window. The eval suite showed that a fix in a tool result or in code was more reliable than more prompt text. The one rule the model still ignores ("do not open with 'Claro que pode!'") is the remaining eval failure.
+
 ### Model and serving
 
 - **Local by default.** No customer data leaves the machine, and there is no cost per message. The OpenAI-compatible API keeps the provider swappable through three environment variables.
