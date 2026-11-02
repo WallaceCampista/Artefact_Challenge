@@ -22,7 +22,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("data-report", help="print the data quality issues found and how they are handled")
     evaluate = sub.add_parser("eval", help="run the evaluation cases against the configured model")
     evaluate.add_argument("--only", help="run a single case by id")
+    evaluate.add_argument("--repeat", type=int, default=1, metavar="N",
+                          help="run each case N times and report consistency (default 1)")
     sub.add_parser("examples", help="record the example conversations into examples/")
+    serve = sub.add_parser("serve", help="start the web app and HTTP API")
+    serve.add_argument("--host", default="127.0.0.1", help="interface to bind (0.0.0.0 in Docker)")
+    serve.add_argument("--port", type=int, default=8000)
+    sub.add_parser("feedback", help="list answers rated down in the web app (candidates for eval cases)")
 
     args = parser.parse_args(argv)
     settings = load_settings()
@@ -43,12 +49,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "eval":
         from .evals import run_eval
 
-        return run_eval(settings, only=args.only)
+        return run_eval(settings, only=args.only, repeat=max(1, args.repeat))
 
     if args.command == "examples":
         from .examples import record_examples
 
         record_examples(settings)
+        return 0
+
+    if args.command == "serve":
+        import uvicorn
+
+        from .web.api import create_app
+
+        print(f"Empório da Música web app on http://{args.host}:{args.port}  (model: {settings.llm_model})")
+        uvicorn.run(create_app(settings), host=args.host, port=args.port, log_level="warning")
+        return 0
+
+    if args.command == "feedback":
+        from .cli import print_negative_feedback
+
+        print_negative_feedback(settings)
         return 0
 
     if args.command == "chat":
