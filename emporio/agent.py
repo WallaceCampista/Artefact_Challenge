@@ -9,6 +9,11 @@ on any OpenAI-compatible server. Per user message:
       -> repeat, at most `max_tool_steps` times, then force a text answer
       -> grounding check: every price / tracking code in the answer must come from a tool
          result or from the conversation; otherwise the model is told so and answers again, once
+      -> privacy guard on the final text (personal data of other customers, system prompt)
+
+Every step is also emitted as a trace event (`on_event`), which the web UI streams live and
+stores with the answer, so each reply can be audited: what was asked, what came back, which
+guard fired.
 """
 from __future__ import annotations
 
@@ -16,11 +21,13 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import openai
 
 from .config import Settings
+from .privacy import PrivacyGuard
 from .prompts import SYSTEM_PROMPT, context_message
 from .text import normalize
 from .tools import ToolBox, ToolCall
@@ -57,6 +64,17 @@ class Reply:
     completion_tokens: int = 0
     grounding_retries: int = 0
     ungrounded: list[str] = field(default_factory=list)  # still unsupported after the retry
+    redacted: list[str] = field(default_factory=list)  # personal data removed by the privacy guard
+    trace: list[dict] = field(default_factory=list)  # every step of this turn, in order
+    message_id: int | None = None  # set when the answer is persisted
+    listener: Callable[[dict], None] | None = field(default=None, repr=False)
+    started: float = field(default_factory=time.perf_counter, repr=False)
+
+    def emit(self, kind: str, **data) -> None:
+        event = {"type": kind, "ms": round((time.perf_counter() - self.started) * 1000), **data}
+        self.trace.append(event)
+        if self.listener is not None:
+            self.listener(event)
 
 
 def calls_from_text(content: str | None, known_tools: set[str]) -> list[dict]:
@@ -173,16 +191,19 @@ def session_facts(calls) -> list[str]:
 
 
 class Agent:
-    def __init__(self, settings: Settings, client: openai.OpenAI, tools: ToolBox):
+    def __init__(self, settings: Settings, client: openai.OpenAI, tools: ToolBox,
+                 guard: PrivacyGuard | None = None):
         self.settings = settings
         self.client = client
         self.tools = tools
+        self.guard = guard
         self.tool_names = {schema["function"]["name"] for schema in tools.schemas}
 
     def _complete(self, messages: list[dict], with_tools: bool, reply: Reply):
         kwargs = dict(model=self.settings.llm_model, messages=messages, temperature=self.settings.llm_temperature)
         if with_tools:
             kwargs["tools"] = self.tools.schemas
+        reply.emit("model_call", n=reply.model_calls + 1, tools_enabled=with_tools)
         try:
             response = self.client.chat.completions.create(**kwargs)
         except openai.OpenAIError as exc:
@@ -207,6 +228,7 @@ class Agent:
             for call in calls:
                 executed = self.tools.run(call["function"]["name"], call["function"]["arguments"])
                 reply.tool_calls.append(executed)
+                self._emit_tool(reply, executed, auto=False)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call["id"],
@@ -215,11 +237,17 @@ class Agent:
         # Step budget exhausted: answer with what was gathered, no more tools.
         return (self._complete(messages, with_tools=False, reply=reply).content or "").strip()
 
-    def _prefetch(self, messages: list[dict], reply: Reply, name: str, arguments: dict) -> None:
+    @staticmethod
+    def _emit_tool(reply: Reply, executed: ToolCall, auto: bool, reason: str | None = None) -> None:
+        reply.emit("tool", name=executed.name, arguments=executed.arguments, result=executed.result,
+                   duration_ms=round(executed.duration_ms, 1), auto=auto, reason=reason)
+
+    def _prefetch(self, messages: list[dict], reply: Reply, name: str, arguments: dict, reason: str) -> None:
         """Runs a tool on the model's behalf and adds it to the conversation as if the model had
         called it. Used where routing is narrow and the cost of a wrong answer is high."""
         executed = self.tools.run(name, arguments)
         reply.tool_calls.append(executed)
+        self._emit_tool(reply, executed, auto=True, reason=reason)
         call_id = f"auto-{len(reply.tool_calls)}"
         messages += [
             {"role": "assistant", "content": "", "tool_calls": [{
@@ -242,12 +270,15 @@ class Agent:
         return None
 
     def respond(self, history: list[dict], message: str, session_id: str | None = None,
-                facts: list[str] | None = None) -> Reply:
+                facts: list[str] | None = None, on_event: Callable[[dict], None] | None = None) -> Reply:
         """Answers one user message. `history` holds previous {"role", "content"} text turns;
-        `facts` are what tools already established in this session (see session_facts)."""
+        `facts` are what tools already established in this session (see session_facts);
+        `on_event` receives each trace event as it happens."""
         started = time.perf_counter()
         self.tools.session_id = session_id
-        reply = Reply(text="")
+        reply = Reply(text="", listener=on_event, started=started)
+        reply.emit("context", now=self.settings.now().isoformat(timespec="minutes"), facts=facts or [],
+                   history_messages=len(history))
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},  # static: cacheable prefix
             *history,
@@ -265,13 +296,15 @@ class Agent:
         # answers from the weekly table (e.g. "come tomorrow 09-13" on a holiday). Asked in code.
         day = hours_question(message)
         if day and "consultar_horario" in self.tool_names:
-            self._prefetch(messages, reply, "consultar_horario", {"quando": day})
+            self._prefetch(messages, reply, "consultar_horario", {"quando": day},
+                           reason="pre-routing: opening hours on a given day")
         # Payment of a product already discussed ("e no PIX, fica quanto?"): tool results are not
         # replayed between turns, so without a new lookup the model guesses installments.
         if PAYMENT_INTENT.search(normalize(message)):
             product = self._product_in_focus(history, message)
             if product is not None:
-                self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name})
+                self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name},
+                               reason="pre-routing: payment question about the product in focus")
 
         text = self._loop(messages, reply)
         for attempt in range(GROUNDING_RETRIES + 1):
@@ -280,8 +313,11 @@ class Agent:
             issues = promotion_issues(text, results)
             if not (missing or issues) or attempt == GROUNDING_RETRIES:
                 reply.ungrounded = missing
+                reply.emit("guard", check="grounding", outcome="unresolved" if (missing or issues) else "pass",
+                           details=missing + issues)
                 break
             reply.grounding_retries += 1
+            reply.emit("guard", check="grounding", outcome="retry", details=missing + issues)
             problems = issues + ([f"cita {', '.join(missing)}, que não aparece(m) em nenhum resultado de ferramenta "
                                   f"desta conversa ({_tool_hint(missing)})"] if missing else [])
             messages += [
@@ -292,7 +328,8 @@ class Agent:
             # Invented deadlines/percentages almost always mean the manual was not read: read it for the model.
             used = {c.name for c in reply.tool_calls}
             if any(m.endswith(("%", "dias")) for m in missing) and "consultar_politicas" not in used:
-                self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message})
+                self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message},
+                               reason="grounding: deadline or percentage without a source")
             text = self._loop(messages, reply)
 
         text = PLACEHOLDER.sub("", text).strip() or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
@@ -301,6 +338,15 @@ class Agent:
             protocol = call.result.get("protocolo") if call.name == "encaminhar_para_equipe" else None
             if protocol and protocol not in text:
                 text += f"\n\nSeu protocolo de atendimento é {protocol}. Nossa equipe retorna em até 24 horas úteis."
+                reply.emit("guard", check="protocol", outcome="appended", details=[protocol])
+        if self.guard is not None:
+            user_text = " ".join(m["content"] for m in history if m["role"] == "user") + " " + message
+            checked = self.guard.apply(text, user_text)
+            text, reply.redacted = checked.text, checked.redacted
+            if checked.prompt_leak:
+                reply.emit("guard", check="system_prompt", outcome="blocked", details=[])
+            elif checked.redacted:
+                reply.emit("guard", check="personal_data", outcome="redacted", details=checked.redacted)
         reply.text = text
         reply.latency_s = time.perf_counter() - started
         return reply

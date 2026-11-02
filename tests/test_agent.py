@@ -198,3 +198,19 @@ def test_verified_order_becomes_a_session_fact():
     client = FakeClient([text_message("Certo, Letícia.")])
     Agent(load_settings(), client, FakeTools()).respond([], "E se tiver defeito?", facts=facts)
     assert "Já verificado nesta conversa" in client.requests[0]["messages"][-2]["content"]
+
+
+def test_every_step_is_emitted_as_a_trace_event():
+    from emporio.privacy import PrivacyGuard
+
+    events = []
+    client = FakeClient([tool_message("detalhes_produto", {"produto": "GD20"}),
+                         text_message("O e-mail da Ana é ana@jmail.com.")])
+    ana = __import__("emporio.catalog", fromlist=["Customer"]).Customer(1, "Ana", "(67) 99123-4567", "ana@jmail.com", "CG")
+    agent = Agent(load_settings(), client, FakeTools(), guard=PrivacyGuard([ana], "# Regras\n- x"))
+    reply = agent.respond([], "Quanto custa o GD20?", on_event=events.append)
+    kinds = [e["type"] for e in events]
+    assert kinds == ["context", "model_call", "tool", "model_call", "guard", "guard"]
+    assert events[2]["name"] == "detalhes_produto" and events[2]["auto"] is False
+    assert events[-1]["check"] == "personal_data" and events[-1]["outcome"] == "redacted"
+    assert "ana@jmail.com" not in reply.text and reply.trace == events
