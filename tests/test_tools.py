@@ -116,6 +116,7 @@ def test_hours_tool_resolves_relative_days_and_holidays(store):
     assert call(tools, "consultar_horario", quando="sábado")["situacao"] == "aberta das 09:00 às 13:00"
     assert "FECHADA" in call(tools, "consultar_horario")["agora"]
     assert call(tools, "consultar_horario", quando="25/12")["situacao"] == "FECHADA (feriado: Natal)"
+    assert call(tools, "consultar_horario", quando="2026-11-15")["situacao"] == "FECHADA (feriado: Proclamação da República)"
 
 
 def test_handoff_mentions_closed_store_only_when_closed(store):

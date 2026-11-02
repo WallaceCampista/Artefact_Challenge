@@ -398,6 +398,9 @@ class ToolBox:
 
     def _resolve_day(self, quando: str) -> date:
         today = self.today
+        iso = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", quando or "")  # models also send 2026-11-05
+        if iso:
+            return date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
         match = re.search(r"\b(\d{1,2})/(\d{1,2})\b", quando or "")  # before normalize() drops the "/"
         text = normalize(quando or "hoje")
         if "depois de amanha" in text:
