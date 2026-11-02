@@ -75,3 +75,17 @@ def print_handoffs(settings: Settings) -> None:
     for t in tickets:
         print(f"{t['protocol']}  [{t['reason']}]  session={t['session_id']}  contact={t['contact'] or '-'}")
         print(f"    {t['summary']}")
+
+
+def print_negative_feedback(settings: Settings) -> None:
+    """Answers customers rated down: each one is a candidate for a new eval case."""
+    from .memory import Database, FeedbackStore
+
+    items = FeedbackStore(Database(settings.db_path)).negatives()
+    if not items:
+        print("No negative feedback.")
+    for item in items:
+        print(f"[{item['session_id']} #{item['id']}] Q: {item['question']}")
+        print(f"    A: {textwrap.shorten(item['answer'], 200, placeholder=' …')}")
+        if item["comment"]:
+            print(f"    comment: {item['comment']}")
