@@ -344,6 +344,8 @@ class ToolBox:
                                                  else " (sem desconto extra: produto já em promoção)"),
                 "cartao_de_credito": (f"até {pay['credit_max_installments']}x de "
                                       f"{format_brl(pay['credit_installment_value'])} sem juros"),
+                "parcelas_sem_juros": "; ".join(f"{n}x de {format_brl(v)}"
+                                                for n, v in pay["credit_installments"].items()) or "só à vista",
                 "debito_ou_boleto": format_brl(pay["debit"]),
                 "pode_combinar_pix_e_cartao": pay["combined_payment_allowed"],
             }

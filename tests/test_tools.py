@@ -46,6 +46,15 @@ def test_price_and_payment_conditions(tools):
     assert result["preco_final"] == "R$ 2.199,00"
     assert result["pagamento"]["pix"].startswith("R$ 2.089,05")
     assert result["pagamento"]["cartao_de_credito"] == "até 12x de R$ 183,25 sem juros"
+    assert "10x de R$ 219,90" in result["pagamento"]["parcelas_sem_juros"]
+
+
+def test_any_allowed_installment_count_has_a_source(tools):
+    # Before: only the maximum (12x) came from the tool, so "em 10x?" answered right was still flagged.
+    from emporio.agent import ungrounded_facts
+    evidence = json.dumps(call(tools, "detalhes_produto", produto="Takamine GD20"), ensure_ascii=False)
+    assert ungrounded_facts("Em 10x sem juros, fica R$ 219,90 por mês.", evidence) == []
+    assert ungrounded_facts("Em 10x sem juros, fica R$ 219,00 por mês.", evidence) == ["R$ 219,00"]
 
 
 def test_promotion_shows_original_price_and_no_pix_stacking(tools):

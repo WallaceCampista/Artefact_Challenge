@@ -36,6 +36,12 @@ def pix_price(price: float, on_promotion: bool) -> float:
     return round(price * (100 - PIX_DISCOUNT_PERCENT) / 100, 2)
 
 
+def installment_values(price: float) -> dict[int, float]:
+    """Every interest-free option the customer may choose, 2x up to the maximum: {2: 1099.5, ...}.
+    Asked "e em 10x?", the model can quote a value a tool computed instead of dividing by itself."""
+    return {n: round(price / n, 2) for n in range(2, max_installments(price) + 1)}
+
+
 def payment_options(price: float, on_promotion: bool) -> dict:
     installments = max_installments(price)
     return {
@@ -43,6 +49,7 @@ def payment_options(price: float, on_promotion: bool) -> dict:
         "pix_discount_applied": not on_promotion,
         "credit_max_installments": installments,
         "credit_installment_value": round(price / installments, 2),
+        "credit_installments": installment_values(price),
         "debit": round(price, 2),
         "boleto": round(price, 2),
         "combined_payment_allowed": price > COMBINED_PAYMENT_ABOVE,
