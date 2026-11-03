@@ -331,7 +331,24 @@ def test_text_in_another_script_is_rewritten_and_trimmed_if_it_stays():
     reply = Agent(load_settings(), client, FakeTools()).respond([], "E a previsão do tempo?", on_event=events.append)
     assert reply.text == "Não posso verificar o clima." and reply.grounding_retries == 1
     assert "outro idioma" in client.requests[1]["messages"][-1]["content"]
+    assert "E a previsão do tempo?" in client.requests[1]["messages"][-1]["content"]  # the rewrite keeps the topic
     assert ("language", "trimmed") in [(e["check"], e["outcome"]) for e in events if e["type"] == "guard"]
+
+
+def test_defect_questions_read_the_manual_first_unless_the_customer_wants_a_handoff():
+    class PolicyTools(FakeTools):
+        schemas = [{"type": "function", "function": {"name": "consultar_politicas"}}]
+
+        def run(self, name, arguments):
+            return ToolCall(name, arguments, {"trechos": [{"secao": "4.2", "texto": "troca por defeito em 30 dias"}]}, 1.0)
+
+    client = FakeClient([text_message("Pela regra 4.2, a troca por defeito vale por 30 dias.")])
+    reply = Agent(load_settings(), client, PolicyTools()).respond([], "E se o ukulele estiver com defeito, o que eu faço?")
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [
+        ("consultar_politicas", {"pergunta": "E se o ukulele estiver com defeito, o que eu faço?"})]
+    client = FakeClient([text_message("Certo, vou encaminhar.")])
+    reply = Agent(load_settings(), client, PolicyTools()).respond([], "Encaminhe para a garantia, está com zumbido.")
+    assert not reply.tool_calls
 
 def test_verified_order_becomes_a_session_fact():
     from emporio.agent import session_facts

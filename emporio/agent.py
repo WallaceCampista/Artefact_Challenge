@@ -187,6 +187,9 @@ NOT_A_CATALOG_QUESTION = re.compile(
     r"pag\w*|horario\w*|abert\w*|endereco|quanto|preco\w*|valor\w*|custa\w*|barat\w*|car[oa]s?|"
     r"cordas?|palhetas?|cabos?|cases?|capas?|pedal|pedais|amplificador\w*|afinador\w*|encordoamento\w*|"
     r"estantes?|correias?|baquetas?|acessorios?)\b")
+# "E se estiver com defeito?": the answer is in the manual (exchange, legal and manufacturer warranty).
+DEFECT_INTENT = re.compile(r"\b(?:defeit\w*|quebr\w*|estragad\w*|nao (?:funciona|liga)|zumbid\w*|trincad\w*|rachad\w*)\b")
+WANTS_HANDOFF = re.compile(r"\b(?:encaminh\w*|chamado|atendente|falar com)\b")
 PROMOTION_WORDS = {"promocao", "promocoes", "oferta", "ofertas", "desconto", "descontos", "liquidacao"}
 CATALOG_FILLER = {"ai", "aqui", "la", "algum", "alguma", "alguns", "algumas", "ainda", "disponivel", "disponiveis",
                   "estoque", "venda", "nao", "orcamento", "instrumento", "instrumentos", "tipo", "tipos", "modelo",
@@ -466,6 +469,13 @@ class Agent:
             if search:
                 self._prefetch(messages, reply, "buscar_produtos", search,
                                reason="pre-routing: what the store has in a category")
+        # A defect question ("e se estiver com defeito?") answered from memory got an invented home pickup in
+        # the recorded examples. The manual has the answer (4.2 exchange, 8.1 legal, 8.2 manufacturer warranty).
+        normalized = normalize(message)
+        if DEFECT_INTENT.search(normalized) and not WANTS_HANDOFF.search(normalized) \
+                and "consultar_politicas" in self.tool_names:
+            self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message},
+                           reason="pre-routing: defect or warranty question")
         # Payment of a product already discussed ("e no PIX, fica quanto?"): tool results are not
         # replayed between turns, so without a new lookup the model guesses installments.
         if PAYMENT_INTENT.search(normalize(message)):
@@ -512,7 +522,8 @@ class Agent:
                 {"role": "assistant", "content": text},
                 {"role": "system", "content": "Verificação automática da resposta acima: " + "; ".join(problems)
                  + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas. "
-                   "O cliente não viu a resposta acima: não peça desculpas por ela."},
+                   "O cliente não viu a resposta acima: não peça desculpas por ela. Responda à última mensagem "
+                   f"do cliente: \"{message}\""},
                 *lookups,
             ]
             # Invented deadlines/percentages almost always mean the manual was not read: read it for the model.

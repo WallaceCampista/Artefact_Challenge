@@ -59,6 +59,7 @@ const PREROUTE_REASONS = {
   "pre-routing: opening hours on a given day": "Pré-roteamento: pergunta sobre o horário da loja em um dia específico",
   "pre-routing: payment question about the product in focus": "Pré-roteamento: pergunta de pagamento sobre o produto em foco",
   "pre-routing: what the store has in a category": "Pré-roteamento: pergunta sobre o que a loja tem numa categoria",
+  "pre-routing: defect or warranty question": "Pré-roteamento: pergunta sobre defeito ou garantia, então o manual foi consultado",
   "grounding: deadline or percentage without a source": "Checagem de fatos: prazo ou percentual sem fonte, então o manual foi consultado",
   "grounding: price without a source": "Checagem de fatos: preço sem fonte, então o código consultou o produto citado",
   "pre-routing: question about a team document": "Pré-roteamento: a pergunta trata de um documento da base de conhecimento",
