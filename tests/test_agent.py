@@ -75,7 +75,8 @@ def test_step_budget_forces_a_final_answer_without_tools(monkeypatch):
 
 
 # --------------------------------------------------------------------------- defences
-from emporio.agent import UNVERIFIED_PRICE_MESSAGE, calls_from_text, drop_unverified_yes, ungrounded_facts
+from emporio.agent import (UNVERIFIED_PRICE_MESSAGE, calls_from_text, catalog_search, drop_unverified_yes,
+                           ungrounded_facts)
 
 TOOLS = {"consultar_pedido", "detalhes_produto"}
 
@@ -196,6 +197,8 @@ class CatalogTools(FakeTools):
 
     def run(self, name, arguments):
         args = arguments if isinstance(arguments, dict) else json.loads(arguments)
+        if name == "buscar_produtos":
+            return ToolCall(name, args, {"total_encontrado": 0, "observacao": "Nenhum produto corresponde a 'cort'."}, 1.0)
         return ToolCall(name, args, {"nome": args["produto"], "pagamento": {"cartao_de_credito": self.installment}}, 1.0)
 
 
@@ -227,6 +230,14 @@ def test_a_price_still_without_a_source_after_the_rewrite_is_never_sent(store):
     assert "não peça desculpas" in client.requests[1]["messages"][-1]["content"]
 
 
+def test_an_installment_rewrite_is_told_where_the_value_is_and_that_pix_does_not_apply():
+    client = FakeClient([text_message("Em 10 vezes, cada parcela fica R$ 1.087,28."),
+                         text_message("Em 10 vezes, cada parcela fica R$ 1.144,50.")])
+    Agent(load_settings(), client, FakeTools()).respond([], "E em 10 vezes?")
+    note = client.requests[1]["messages"][-1]["content"]
+    assert "parcelas_sem_juros" in note and "PIX não vale no cartão" in note
+
+
 def test_a_wrong_price_of_a_real_product_is_rewritten_with_its_details(store):
     client = FakeClient([text_message("Em 12x, o Yamaha Bass 3X fica R$ 358,33."),
                          text_message("Em 12x, o Yamaha Bass 3X fica R$ 358,25.")])
@@ -250,6 +261,28 @@ def test_a_yes_before_the_order_is_checked_is_removed():
         [], "Me arrependi da minha compra, posso devolver?", on_event=events.append)
     assert reply.text == asks
     assert [(e["check"], e["outcome"]) for e in events if e["type"] == "guard"][-1] == ("promise", "removed")
+
+
+def test_questions_about_what_the_store_has_are_searched_in_code(store):
+    assert catalog_search("quais baixos vocês têm?", None, store) == {"categoria": "Baixos"}
+    assert catalog_search("Baixo da Cort, vocês têm?", None, store) == {"categoria": "Baixos", "termo": "cort"}
+    # "List what you have" right after it repeats the previous question.
+    assert catalog_search("não tenho orçamento, liste-me o que tiver", "Baixo da Cort, vocês têm?", store) == \
+        {"categoria": "Baixos", "termo": "cort"}
+    assert catalog_search("Tem algum violão em promoção?", None, store) == {"categoria": "Violões", "apenas_promocoes": True}
+    # Left to the model: a model name, a price, a policy, an accessory, a long description.
+    for message in ["Vocês têm o violão Shelby SN-7C?", "Quais violões até R$ 1000?", "Esse violão tem garantia?",
+                    "Vocês vendem cordas de violão?", "Qual o violão de preço mais baixo?",
+                    "Vocês têm violão bom para iniciante que caiba na mochila?"]:
+        assert catalog_search(message, None, store) is None, message
+
+    class SearchTools(CatalogTools):
+        schemas = [{"type": "function", "function": {"name": n}} for n in ("buscar_produtos", "detalhes_produto")]
+
+    client = FakeClient([text_message("Não trabalhamos com a Cort, mas temos outros baixos.")])
+    reply = Agent(load_settings(), client, SearchTools(store)).respond([], "Baixo da Cort, vocês têm?")
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [("buscar_produtos", {"categoria": "Baixos", "termo": "cort"})]
+    assert client.requests[0]["messages"][-1]["role"] == "tool"  # the model answers with the search in front of it
 
 def test_verified_order_becomes_a_session_fact():
     from emporio.agent import session_facts

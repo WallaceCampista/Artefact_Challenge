@@ -28,10 +28,11 @@ from dataclasses import dataclass, field
 
 import openai
 
+from .catalog import CATEGORY_ALIASES, KNOWN_BRANDS
 from .config import Settings
 from .privacy import PrivacyGuard
 from .prompts import SYSTEM_PROMPT, context_message
-from .text import normalize
+from .text import normalize, tokens
 from .tools import ToolBox, ToolCall
 
 # Small local models sometimes write the call as text (sometimes with a broken <tool_call> tag)
@@ -168,15 +169,76 @@ def hours_question(message: str) -> str | None:
     return None
 
 
+# "Vocês têm X?" about a category. Questions with a model name, a price, a policy, an order or an
+# accessory are left to the model: its own routing passes the evals there.
+CATALOG_INTENT = re.compile(r"\b(?:tem|tens|teem|vende\w*|trabalh\w*|quais|opcoes|list\w*|mostr\w*|tiver)\b")
+LISTING_INTENT = re.compile(r"\b(?:list\w*|mostr\w*|tiver|todos|todas|opcoes)\b")
+NOT_A_CATALOG_QUESTION = re.compile(
+    r"\b(?:pedido|compr\w*|chegou|devolv\w*|troc\w*|reclam\w*|garantia|frete|entreg\w*|prazo\w*|pix|parcel\w*|"
+    r"pag\w*|horario\w*|abert\w*|endereco|quanto|preco\w*|valor\w*|custa\w*|barat\w*|car[oa]s?|"
+    r"cordas?|palhetas?|cabos?|cases?|capas?|pedal|pedais|amplificador\w*|afinador\w*|encordoamento\w*|"
+    r"estantes?|correias?|baquetas?|acessorios?)\b")
+PROMOTION_WORDS = {"promocao", "promocoes", "oferta", "ofertas", "desconto", "descontos", "liquidacao"}
+CATALOG_FILLER = {"ai", "aqui", "la", "algum", "alguma", "alguns", "algumas", "ainda", "disponivel", "disponiveis",
+                  "estoque", "venda", "nao", "orcamento", "instrumento", "instrumentos", "tipo", "tipos", "modelo",
+                  "modelos", "opcao", "opcoes", "todos", "todas", "hoje", "agora", "entao", "ok", "sim"}
+ALIAS_WORDS = {word for aliases in CATEGORY_ALIASES.values() for alias in aliases for word in alias.split()}
+
+
+def _category_question(text: str, store) -> dict | None:
+    norm = normalize(text)
+    if re.search(r"\d", norm) or not CATALOG_INTENT.search(norm) or NOT_A_CATALOG_QUESTION.search(norm):
+        return None
+    if store.products_mentioned(text):  # a model name: detalhes_produto territory
+        return None
+    padded = f" {norm} "
+    categories = {cid for cid, aliases in CATEGORY_ALIASES.items() if any(f" {a} " in padded for a in aliases)}
+    if len(categories) != 1:
+        return None
+    rest = [w for w in tokens(norm) if w not in ALIAS_WORDS and w not in CATALOG_FILLER and not CATALOG_INTENT.fullmatch(w)]
+    promotions = any(w in PROMOTION_WORDS for w in rest)
+    rest = [w for w in rest if w not in PROMOTION_WORDS]
+    brands = [b for b in KNOWN_BRANDS if f" {normalize(b)} " in padded]
+    if brands:
+        term = brands[0]
+    elif len(rest) <= 1:
+        term = rest[0] if rest else None  # "baixo da Cort" -> "cort", a brand the store may not sell
+    else:
+        return None  # several unknown words: a description the model reads better than this rule
+    arguments = {"categoria": store.categories[categories.pop()].name}
+    if term:
+        arguments["termo"] = term
+    if promotions:
+        arguments["apenas_promocoes"] = True
+    return arguments
+
+
+def catalog_search(message: str, previous: str | None, store) -> dict | None:
+    """buscar_produtos arguments when the customer asks what the store has in a category, else None:
+    "Baixo da Cort, vocês têm?" -> {"categoria": "Baixos", "termo": "cort"}. "Liste o que tiver" right
+    after it repeats the previous question. Tested live, the model asked for a budget twice and then
+    listed three Cort basses with prices; the store sells none."""
+    found = _category_question(message, store)
+    norm = normalize(message)
+    if found is None and previous and LISTING_INTENT.search(norm) and not re.search(r"\d", norm) \
+            and not NOT_A_CATALOG_QUESTION.search(norm):
+        found = _category_question(previous, store)
+    return found
+
+
 def _is_price(fact: str) -> bool:
     """A money amount ("R$ 358,25") or an installment count ("12x") from ungrounded_facts."""
     return fact.startswith("R$") or fact.endswith("x")
 
 
-def _tool_hint(missing: list[str]) -> str:
+def _tool_hint(missing: list[str], answer: str = "") -> str:
     hints = []
     if any(m.startswith("R$") for m in missing):
         hints.append("preços: detalhes_produto ou buscar_produtos")
+        if re.search(r"parcel|vezes|\d+\s?x\b", normalize(answer)):
+            # Live: the model divided the PIX price by 10 twice; card installments use the list price.
+            hints.append("valor de cada parcela: copie de parcelas_sem_juros (detalhes_produto), que é calculado "
+                         "sobre o preço de tabela; o desconto do PIX não vale no cartão")
     if any(m.endswith("x") for m in missing):
         hints.append("parcelas: detalhes_produto")
     if any(m.endswith(("%", "dias")) for m in missing):
@@ -348,6 +410,15 @@ class Agent:
         if day and "consultar_horario" in self.tool_names:
             self._prefetch(messages, reply, "consultar_horario", {"quando": day},
                            reason="pre-routing: opening hours on a given day")
+        # "Vocês têm baixo da Cort?": the prompt says to search before saying what the store has; the
+        # model sometimes answers from memory instead, inventing models and prices. Searched in code.
+        store = getattr(self.tools, "store", None)
+        if store is not None and "buscar_produtos" in self.tool_names:
+            previous = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
+            search = catalog_search(message, previous, store)
+            if search:
+                self._prefetch(messages, reply, "buscar_produtos", search,
+                               reason="pre-routing: what the store has in a category")
         # Payment of a product already discussed ("e no PIX, fica quanto?"): tool results are not
         # replayed between turns, so without a new lookup the model guesses installments.
         if PAYMENT_INTENT.search(normalize(message)):
@@ -389,7 +460,7 @@ class Agent:
             reply.grounding_retries += 1
             reply.emit("guard", check="grounding", outcome="retry", details=missing + issues)
             problems = issues + ([f"cita {', '.join(missing)}, que não aparece(m) em nenhum resultado de ferramenta "
-                                  f"desta conversa ({_tool_hint(missing)})"] if missing else [])
+                                  f"desta conversa ({_tool_hint(missing, text)})"] if missing else [])
             messages += [
                 {"role": "assistant", "content": text},
                 {"role": "system", "content": "Verificação automática da resposta acima: " + "; ".join(problems)
