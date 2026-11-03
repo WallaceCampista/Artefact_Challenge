@@ -6,7 +6,7 @@
 
 **Cliente:** Quais opções de violões disponíveis custando até R$1000?
 
-**Tom:** Aqui estão algumas opções de violões que você pode gostar, todos com preço abaixo de R$1000:  
+**Tom:** Aqui estão algumas opções de violões que você pode gostar, todos com preço até R$1000:  
   
 - **Tagima Memphis AC-39 Nylon Natural** - R$ 429,90  
 - **Rozini RC-104 Nylon Estudante** - R$ 459,90  
@@ -16,12 +16,12 @@
 - **Giannini GN-15 Nylon Cedr Natural** - R$ 689,00  
 - **Yamaha F310 Aço Natural** - R$ 699,90  
 - **Tagima Dallas Tuner Aço Natural** - R$ 749,00  
-- **Shelby SGD-195E Elétrico Aço Sunburst** - R$ 799,00 (embora seja elétrico, pode ser interessante para quem busca um som acústico)  
+- **Shelby SGD-195E Elétrico Aço Sunburst** - R$ 799,00  
 - **Yamaha C70 Nylon Natural** - R$ 849,00  
   
-Qual desses modelos você gostaria de conhecer mais?
+Posso lhe ajudar a refinar mais a busca ou com algo mais?
 
-<details><summary>Tools used: buscar_produtos · 24.0 s</summary>
+<details><summary>Tools used: buscar_produtos · 14.8 s</summary>
 
 `buscar_produtos({"categoria": "Violões", "preco_maximo": 1000})`
 
@@ -35,25 +35,25 @@ Qual desses modelos você gostaria de conhecer mais?
 
 **Cliente:** Desses, qual você indica para um iniciante que quer cordas de nylon?
 
-**Tom:** Para um iniciante que prefere cordas de nylon, sugiro o **Tagima Memphis AC-39 Nylon Natural** ou a **Rozini RC-104 Nylon Estudante**. Ambos são modelos adequados para quem está começando e têm preços acessíveis.  
+**Tom:** Para um iniciante que prefere cordas de nylon, sugiro o **Tagima Memphis AC-39 Nylon Natural** ou a **Rozini RC-104 Nylon Estudante**. Ambos são ótimos para quem está começando e têm preços acessíveis.  
   
-Qual desses você gostaria de saber mais detalhes? Ou precisa de alguma outra recomendação?
+Qual desses você gostaria de conhecer mais? Ou há outro que você esteja interessado?
 
-<sub>No tool needed · 7.1 s</sub>
+<sub>No tool needed · 4.5 s</sub>
 
 ---
 
 **Cliente:** E o Giannini GF-3D, vocês têm?
 
-**Tom:** Peço desculpas, mas no momento não temos o Giannini GF-3D em estoque. No entanto, você pode considerar algumas alternativas:  
+**Tom:** O **Giannini GF-3D** está temporariamente indisponível no momento, mas você pode considerar algumas alternativas:  
   
 - **Shelby SGD-195E Elétrico Aço Sunburst** - R$ 799,00  
 - **Yamaha C70 Nylon Natural** - R$ 849,00  
 - **Tagima Dallas Tuner Aço Natural** - R$ 749,00  
   
-Estes modelos também são excelentes para iniciantes e oferecem ótimas características sonoras. Você gostaria de saber mais sobre algum deles?
+Posso lhe ajudar com algo mais?
 
-<details><summary>Tools used: detalhes_produto · 13.9 s</summary>
+<details><summary>Tools used: detalhes_produto · 7.6 s</summary>
 
 `detalhes_produto({"produto": "Giannini GF-3D"})`
 

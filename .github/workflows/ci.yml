@@ -1,0 +1,46 @@
+# Checks that need no model: unit tests on every supported Python, the data-quality
+# report and the Docker image. The end-to-end evals need a model server, so they run
+# locally (`python -m emporio eval --repeat 3`) and their report is committed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - name: Data-quality report
+        run: python -m emporio data-report
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t emporio-tom .
+      - name: Start it and check /health
+        run: |
+          docker run -d --name tom -p 8000:8000 emporio-tom
+          for i in $(seq 1 30); do curl -fs localhost:8000/health && break; sleep 1; done
+          curl -fs localhost:8000/health | grep '"status":"ok"'
+          curl -fs localhost:8000/ | grep -q 'app.js'
+      - if: always()
+        run: docker logs tom || true

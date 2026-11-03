@@ -1,6 +1,6 @@
 import pytest
 
-from emporio.payments import max_installments, payment_options, pix_price
+from emporio.payments import installment_values, max_installments, payment_options, pix_price
 
 
 @pytest.mark.parametrize(
@@ -26,3 +26,9 @@ def test_pix_discount_does_not_stack_with_promotions():
 def test_combined_payment_only_above_2000():
     assert payment_options(2000.0, False)["combined_payment_allowed"] is False
     assert payment_options(2000.01, False)["combined_payment_allowed"] is True
+
+
+def test_every_allowed_installment_count_is_listed():
+    assert installment_values(4299.0)[10] == 429.9 and installment_values(4299.0)[12] == 358.25
+    assert list(installment_values(349.9)) == [2, 3, 4]  # 5x would be below the R$ 80 minimum
+    assert installment_values(49.0) == {}  # below R$ 50 even in 2x: single payment only

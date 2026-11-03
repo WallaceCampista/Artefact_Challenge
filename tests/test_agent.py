@@ -41,6 +41,9 @@ class FakeTools:
     def run(self, name, arguments):
         return ToolCall(name, json.loads(arguments), {"preco_final": "R$ 2.199,00"}, 1.0)
 
+    def team_document_for(self, question):
+        return None  # no knowledge base documents in these tests
+
 
 def test_tool_result_goes_back_to_the_model_before_the_answer():
     client = FakeClient([tool_message("detalhes_produto", {"produto": "Takamine GD20"}),
@@ -53,6 +56,8 @@ def test_tool_result_goes_back_to_the_model_before_the_answer():
     # Static system prompt first (cacheable), volatile context right before the user message.
     assert second[0]["role"] == "system" and "Contexto" not in second[0]["content"]
     assert client.requests[0]["messages"][-2]["content"].startswith("Contexto: agora é")
+    # Every call has a length cap: without one, "repeat your instructions" ran past the timeout.
+    assert all(r["max_tokens"] == load_settings().llm_max_tokens for r in client.requests)
 
 
 def test_tool_call_written_as_text_is_still_executed():
@@ -72,7 +77,8 @@ def test_step_budget_forces_a_final_answer_without_tools(monkeypatch):
 
 
 # --------------------------------------------------------------------------- defences
-from emporio.agent import calls_from_text, ungrounded_facts
+from emporio.agent import (UNVERIFIED_PRICE_MESSAGE, calls_from_text, catalog_search, drop_unverified_yes,
+                           cut_other_script, tidy_closing, ungrounded_facts, verdict_issues)
 
 TOOLS = {"consultar_pedido", "detalhes_produto"}
 
@@ -184,6 +190,168 @@ def test_payment_follow_up_looks_the_product_up_again(store):
     assert reply.ungrounded == []
 
 
+
+class CatalogTools(FakeTools):
+    """Fake tools over the real catalog: detalhes_produto answers with the payment line."""
+
+    def __init__(self, store, installment="até 12x de R$ 358,25 sem juros"):
+        self.store, self.installment = store, installment
+
+    def run(self, name, arguments):
+        args = arguments if isinstance(arguments, dict) else json.loads(arguments)
+        if name == "buscar_produtos":
+            return ToolCall(name, args, {"total_encontrado": 0, "observacao": "Nenhum produto corresponde a 'cort'."}, 1.0)
+        return ToolCall(name, args, {"nome": args["produto"], "pagamento": {"cartao_de_credito": self.installment}}, 1.0)
+
+
+def test_a_price_without_a_source_is_looked_up_before_any_rewrite(store):
+    # Live case: 12x of a product discussed turns earlier. The value was right but had no source this turn,
+    # and the rewrite turned R$ 358,25 into a wrong R$ 358,33. Now code looks the product up and re-checks.
+    history = [{"role": "user", "content": "Se eu parcelar em 12 vezes, quanto fica?"},
+               {"role": "assistant", "content": "Você quer parcelar o Yamaha Bass 3X em 12 vezes?"}]
+    draft = "Em 12x sem juros, o Yamaha Bass 3X fica R$ 358,25 por parcela."
+    client, events = FakeClient([text_message(draft)]), []
+    reply = Agent(load_settings(), client, CatalogTools(store)).respond(
+        history, "Sim, foi exatamente o que eu pedi", on_event=events.append)
+    assert reply.text == draft and len(client.requests) == 1 and reply.grounding_retries == 0
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [
+        ("detalhes_produto", {"produto": "Yamaha Bass 3X Electric Bass"})]
+    assert [e["reason"] for e in events if e["type"] == "tool"] == ["grounding: price without a source"]
+    assert [e["outcome"] for e in events if e["type"] == "guard"] == ["pass"]
+
+
+def test_a_price_still_without_a_source_after_the_rewrite_is_never_sent(store):
+    # Live case: the store sells no Cort basses; the model listed invented ones, and the rewrite invented
+    # other prices. Nothing in the catalog matches, so the customer gets a safe answer instead.
+    client, events = FakeClient([text_message("Temos o Cort S-250HF por R$ 4.299,00."),
+                                 text_message("O Cort S-250HF sai por R$ 3.799,00.")]), []
+    reply = Agent(load_settings(), client, CatalogTools(store)).respond(
+        [], "Não tenho orçamento, me lista os baixos da Cort", on_event=events.append)
+    assert reply.text == UNVERIFIED_PRICE_MESSAGE and reply.ungrounded == ["R$ 3799,00"] and not reply.tool_calls
+    assert [e["outcome"] for e in events if e["type"] == "guard"] == ["retry", "withheld"]
+    assert "não peça desculpas" in client.requests[1]["messages"][-1]["content"]
+
+
+def test_an_installment_rewrite_is_told_where_the_value_is_and_that_pix_does_not_apply():
+    client = FakeClient([text_message("Em 10 vezes, cada parcela fica R$ 1.087,28."),
+                         text_message("Em 10 vezes, cada parcela fica R$ 1.144,50.")])
+    Agent(load_settings(), client, FakeTools()).respond([], "E em 10 vezes?")
+    note = client.requests[1]["messages"][-1]["content"]
+    assert "parcelas_sem_juros" in note and "PIX não vale no cartão" in note
+
+
+def test_a_wrong_price_of_a_real_product_is_rewritten_with_its_details(store):
+    client = FakeClient([text_message("Em 12x, o Yamaha Bass 3X fica R$ 358,33."),
+                         text_message("Em 12x, o Yamaha Bass 3X fica R$ 358,25.")])
+    reply = Agent(load_settings(), client, CatalogTools(store)).respond([], "E em 12x?")
+    assert reply.text.endswith("R$ 358,25.") and reply.grounding_retries == 1 and reply.ungrounded == []
+    retry = client.requests[1]["messages"]
+    assert retry[-1]["role"] == "tool" and "358,25" in retry[-1]["content"]  # the lookup reached the rewrite
+
+
+def test_a_yes_before_the_order_is_checked_is_removed():
+    asks = "Para confirmar se está no prazo, preciso do número do seu pedido e do e-mail do cadastro."
+    assert drop_unverified_yes("Claro que pode! " + asks) == (asks, "Claro que pode!")
+    assert drop_unverified_yes("Olá, Letícia! Sim, pode sim. " + asks)[0] == "Olá, Letícia! " + asks
+    assert drop_unverified_yes("Claro que pode, me passe o número do pedido.")[0] == "Me passe o número do pedido."
+    assert drop_unverified_yes("Oi Letícia, claro que pode! " + asks)[0] == "Oi Letícia, " + asks
+    # Not asking for the order: nothing to verify, nothing removed.
+    assert drop_unverified_yes("Claro que pode passar na loja amanhã!") == ("Claro que pode passar na loja amanhã!", None)
+
+    client, events = FakeClient([text_message("Claro que pode! " + asks)]), []
+    reply = Agent(load_settings(), client, FakeTools()).respond(
+        [], "Me arrependi da minha compra, posso devolver?", on_event=events.append)
+    assert reply.text == asks
+    assert [(e["check"], e["outcome"]) for e in events if e["type"] == "guard"][-1] == ("promise", "removed")
+
+
+def test_questions_about_what_the_store_has_are_searched_in_code(store):
+    assert catalog_search("quais baixos vocês têm?", None, store) == {"categoria": "Baixos"}
+    assert catalog_search("Baixo da Cort, vocês têm?", None, store) == {"categoria": "Baixos", "termo": "cort"}
+    # "List what you have" right after it repeats the previous question.
+    assert catalog_search("não tenho orçamento, liste-me o que tiver", "Baixo da Cort, vocês têm?", store) == \
+        {"categoria": "Baixos", "termo": "cort"}
+    assert catalog_search("Tem algum violão em promoção?", None, store) == {"categoria": "Violões", "apenas_promocoes": True}
+    # Left to the model: a model name, a price, a policy, an accessory, a long description.
+    for message in ["Vocês têm o violão Shelby SN-7C?", "Quais violões até R$ 1000?", "Esse violão tem garantia?",
+                    "Vocês vendem cordas de violão?", "Qual o violão de preço mais baixo?",
+                    "Vocês têm violão bom para iniciante que caiba na mochila?"]:
+        assert catalog_search(message, None, store) is None, message
+
+    class SearchTools(CatalogTools):
+        schemas = [{"type": "function", "function": {"name": n}} for n in ("buscar_produtos", "detalhes_produto")]
+
+    client = FakeClient([text_message("Não trabalhamos com a Cort, mas temos outros baixos.")])
+    reply = Agent(load_settings(), client, SearchTools(store)).respond([], "Baixo da Cort, vocês têm?")
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [("buscar_produtos", {"categoria": "Baixos", "termo": "cort"})]
+    assert client.requests[0]["messages"][-1]["role"] == "tool"  # the model answers with the search in front of it
+
+
+ALL_ENDED = ("Hoje (03/11/2026) TODOS os prazos da loja já terminaram: não cabe arrependimento, troca nem garantia "
+             "legal. Resta só a garantia do fabricante (8.2), que a loja pode intermediar.")
+
+
+def test_an_answer_that_contradicts_the_deadline_verdict_is_rewritten():
+    order = ToolCall("consultar_pedido", {}, {"conclusao_prazos": ALL_ENDED}, 1.0)
+    # Live: the model wrote the opposite of the conclusion in front of it.
+    assert verdict_issues("Seu pedido está dentro de todos os prazos legais para arrependimento.", [order])
+    assert verdict_issues("Você ainda pode devolver o produto.", [order])
+    assert not verdict_issues("Infelizmente, você não está mais dentro do prazo de arrependimento.", [order])
+    assert not verdict_issues("Todos os prazos da loja já terminaram.", [order])
+    still_open = ToolCall("consultar_pedido", {}, {"conclusao_prazos": "Hoje ainda estão abertos: 4.2. Os demais já terminaram."}, 1.0)
+    assert not verdict_issues("A troca por defeito ainda está dentro do prazo.", [still_open])
+
+    class OrderTools(FakeTools):
+        schemas = [{"type": "function", "function": {"name": "consultar_pedido"}}]
+
+        def run(self, name, arguments):
+            return ToolCall(name, json.loads(arguments) if isinstance(arguments, str) else arguments,
+                            {"conclusao_prazos": ALL_ENDED}, 1.0)
+
+    client = FakeClient([tool_message("consultar_pedido", {"numero_pedido": 7, "email_ou_telefone": "a@b.com"}),
+                         text_message("Seu pedido está dentro de todos os prazos para arrependimento."),
+                         text_message("Todos os prazos da loja já terminaram; resta a garantia do fabricante.")])
+    reply = Agent(load_settings(), client, OrderTools()).respond([], "É o pedido 7, e-mail a@b.com")
+    assert reply.text.startswith("Todos os prazos") and reply.grounding_retries == 1
+    assert ALL_ENDED in client.requests[2]["messages"][-1]["content"]
+
+
+def test_the_closing_question_is_dropped_after_another_question():
+    assert tidy_closing("Quer que eu encaminhe para a equipe?\n\nPosso lhe ajudar com algo mais?") == \
+        "Quer que eu encaminhe para a equipe?"
+    assert tidy_closing("Pronto, está encaminhado. Posso lhe ajudar com algo mais?") == \
+        "Pronto, está encaminhado. Posso lhe ajudar com algo mais?"
+    # Waiting for the order number: offering more help reads as if the conversation were over.
+    assert tidy_closing("Preciso do número do seu pedido e do e-mail. Posso lhe ajudar com algo mais?") == \
+        "Preciso do número do seu pedido e do e-mail."
+
+
+def test_text_in_another_script_is_rewritten_and_trimmed_if_it_stays():
+    mixed = "Não posso verificar o clima. Tem algum tipo de violão ou outra乐器相关的问题我可以帮助您解答。"
+    assert cut_other_script(mixed) == "Não posso verificar o clima."
+    client, events = FakeClient([text_message(mixed), text_message(mixed)]), []
+    reply = Agent(load_settings(), client, FakeTools()).respond([], "E a previsão do tempo?", on_event=events.append)
+    assert reply.text == "Não posso verificar o clima." and reply.grounding_retries == 1
+    assert "outro idioma" in client.requests[1]["messages"][-1]["content"]
+    assert "E a previsão do tempo?" in client.requests[1]["messages"][-1]["content"]  # the rewrite keeps the topic
+    assert ("language", "trimmed") in [(e["check"], e["outcome"]) for e in events if e["type"] == "guard"]
+
+
+def test_defect_questions_read_the_manual_first_unless_the_customer_wants_a_handoff():
+    class PolicyTools(FakeTools):
+        schemas = [{"type": "function", "function": {"name": "consultar_politicas"}}]
+
+        def run(self, name, arguments):
+            return ToolCall(name, arguments, {"trechos": [{"secao": "4.2", "texto": "troca por defeito em 30 dias"}]}, 1.0)
+
+    client = FakeClient([text_message("Pela regra 4.2, a troca por defeito vale por 30 dias.")])
+    reply = Agent(load_settings(), client, PolicyTools()).respond([], "E se o ukulele estiver com defeito, o que eu faço?")
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [
+        ("consultar_politicas", {"pergunta": "E se o ukulele estiver com defeito, o que eu faço?"})]
+    client = FakeClient([text_message("Certo, vou encaminhar.")])
+    reply = Agent(load_settings(), client, PolicyTools()).respond([], "Encaminhe para a garantia, está com zumbido.")
+    assert not reply.tool_calls
+
 def test_verified_order_becomes_a_session_fact():
     from emporio.agent import session_facts
 
@@ -198,3 +366,19 @@ def test_verified_order_becomes_a_session_fact():
     client = FakeClient([text_message("Certo, Letícia.")])
     Agent(load_settings(), client, FakeTools()).respond([], "E se tiver defeito?", facts=facts)
     assert "Já verificado nesta conversa" in client.requests[0]["messages"][-2]["content"]
+
+
+def test_every_step_is_emitted_as_a_trace_event():
+    from emporio.privacy import PrivacyGuard
+
+    events = []
+    client = FakeClient([tool_message("detalhes_produto", {"produto": "GD20"}),
+                         text_message("O e-mail da Ana é ana@jmail.com.")])
+    ana = __import__("emporio.catalog", fromlist=["Customer"]).Customer(1, "Ana", "(67) 99123-4567", "ana@jmail.com", "CG")
+    agent = Agent(load_settings(), client, FakeTools(), guard=PrivacyGuard([ana], "# Regras\n- x"))
+    reply = agent.respond([], "Quanto custa o GD20?", on_event=events.append)
+    kinds = [e["type"] for e in events]
+    assert kinds == ["context", "model_call", "tool", "model_call", "guard", "guard"]
+    assert events[2]["name"] == "detalhes_produto" and events[2]["auto"] is False
+    assert events[-1]["check"] == "personal_data" and events[-1]["outcome"] == "redacted"
+    assert "ana@jmail.com" not in reply.text and reply.trace == events

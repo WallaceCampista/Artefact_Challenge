@@ -7,6 +7,8 @@ Pipeline: PDF -> clean text -> one chunk per numbered section -> hybrid search.
   paraphrases ("quanto tempo demora pra chegar" -> delivery deadlines). Both rankings are
   merged with Reciprocal Rank Fusion, which needs no score calibration between them.
 - Without an embedding model (or if the server fails), search falls back to BM25 alone.
+- Embeddings are cached per section text, so adding a team document (see knowledge.py) only
+  embeds that document's sections.
 """
 from __future__ import annotations
 
@@ -14,7 +16,9 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +31,7 @@ log = logging.getLogger(__name__)
 HEADER = "Empório da Música Manual de Políticas e Procedimentos"
 HEADING = re.compile(r"^(\d+)(?:\.(\d+))?\.?\s+(\S.*)$")
 RRF_K = 60
+EMBED_BATCH = 32
 
 
 @dataclass(frozen=True)
@@ -35,10 +40,11 @@ class PolicySection:
     title: str  # "Direito de Arrependimento (Compras Online)"
     parent: str  # "4. Política de Trocas e Devoluções" ("" for top-level sections)
     body: str
+    source: str = ""  # title of the team document it came from; "" for the store manual
 
     @property
     def label(self) -> str:
-        return f"{self.number} {self.title}"
+        return f"{self.number} {self.title}" if self.number else self.title
 
     @property
     def text(self) -> str:
@@ -83,8 +89,12 @@ def parse_sections(pdf_path: Path) -> list[PolicySection]:
     lines: list[str] = []
     for page in reader.pages[1:]:  # page 1 is the cover
         lines += _clean_page(page.extract_text(extraction_mode="layout"))
-    lines = _join_wrapped(lines)
+    return numbered_sections(_join_wrapped(lines))
 
+
+def numbered_sections(lines: list[str]) -> list[PolicySection]:
+    """Splits text at numbered headings ("4. Trocas", "4.1 Arrependimento"); text before the first
+    heading is dropped. Also used for team documents numbered the same way."""
     sections: list[PolicySection] = []
     top_number, top_title = 0, ""
     current: dict | None = None
@@ -122,6 +132,29 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / norm if norm else 0.0
 
 
+@dataclass
+class Hit:
+    """One retrieved section and why: its place in each ranking and the fused score."""
+    section: PolicySection
+    score: float  # Reciprocal Rank Fusion
+    bm25_rank: int | None = None  # 1-based; None when no query term occurs in the section
+    bm25_score: float = 0.0
+    vector_rank: int | None = None  # None without embeddings
+    similarity: float | None = None
+
+
+@dataclass
+class EmbeddingReport:
+    embedded: int = 0  # sections sent to the embedding model while building this index
+    cached: int = 0  # sections whose vectors were already on disk
+    ms: int = 0
+    error: str | None = None
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 class PolicyIndex:
     def __init__(self, sections: list[PolicySection], embedder=None, cache_dir: Path | None = None):
         self.sections = sections
@@ -129,12 +162,16 @@ class PolicyIndex:
         self.bm25 = BM25([stems(f"{s.title} {s.title} {s.parent} {s.body}") for s in sections])
         self.embedder = None
         self.vectors: list[list[float]] = []
+        self.embeddings = EmbeddingReport()
         if embedder is not None:
+            started = time.perf_counter()
             try:
                 self.vectors = self._load_vectors(embedder, cache_dir)
                 self.embedder = embedder
             except Exception as exc:  # server down, model not loaded...
                 log.warning("embeddings unavailable, policy search uses BM25 only: %s", exc)
+                self.embeddings.error = type(exc).__name__
+            self.embeddings.ms = round((time.perf_counter() - started) * 1000)
 
     @classmethod
     def from_pdf(cls, pdf_path: Path, embedder=None, cache_dir: Path | None = None) -> "PolicyIndex":
@@ -145,32 +182,57 @@ class PolicyIndex:
         return "hybrid (BM25 + embeddings, RRF)" if self.embedder else "BM25"
 
     def _load_vectors(self, embedder, cache_dir: Path | None) -> list[list[float]]:
+        """One vector per section text, cached on disk by text: re-indexing after a team document
+        changes only embeds the sections that are new."""
         texts = [s.text for s in self.sections]
-        key = hashlib.sha256(json.dumps([embedder.model, texts]).encode()).hexdigest()[:16]
-        cache = cache_dir / f"policy-embeddings-{key}.json" if cache_dir else None
+        keys = [_digest(t) for t in texts]
+        cache = cache_dir / f"embeddings-{_digest(embedder.model)}.json" if cache_dir else None
+        stored: dict[str, list[float]] = {}
         if cache and cache.exists():
-            return json.loads(cache.read_text())
-        vectors = embedder.documents(texts)
-        if cache:
+            try:
+                stored = json.loads(cache.read_text())
+            except ValueError:
+                log.warning("embedding cache %s is unreadable, rebuilding it", cache.name)
+        missing = list(dict.fromkeys(t for t, key in zip(texts, keys) if key not in stored))
+        for start in range(0, len(missing), EMBED_BATCH):
+            batch = missing[start:start + EMBED_BATCH]
+            stored.update(zip((_digest(t) for t in batch), embedder.documents(batch)))
+        if missing and cache:
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(vectors))
-        return vectors
+            partial = cache.with_suffix(f".{os.getpid()}.tmp")
+            partial.write_text(json.dumps(stored))
+            os.replace(partial, cache)  # atomic: the web app and an eval run may share var/
+        self.embeddings.embedded, self.embeddings.cached = len(missing), len(texts) - len(missing)
+        return [stored[key] for key in keys]
 
-    def search(self, query: str, k: int = 3) -> list[PolicySection]:
-        rankings = []
+    def explain(self, query: str, k: int = 3) -> list[Hit]:
+        """The k best sections with each ranking that put them there (the web app shows this)."""
+        n = len(self.sections)
         bm25_scores = self.bm25.scores(stems(query))
-        rankings.append([i for i in sorted(range(len(self.sections)), key=lambda i: -bm25_scores[i])
-                         if bm25_scores[i] > 0])
+        bm25_order = [i for i in sorted(range(n), key=lambda i: -bm25_scores[i]) if bm25_scores[i] > 0]
+        rankings = [bm25_order]
+        sims: list[float] = []
         if self.embedder is not None:
             try:
                 q = self.embedder.query(query)
                 sims = [_cosine(q, v) for v in self.vectors]
-                rankings.append(sorted(range(len(self.sections)), key=lambda i: -sims[i]))
+                rankings.append(sorted(range(n), key=lambda i: -sims[i]))
             except Exception as exc:
                 log.warning("query embedding failed, using BM25 only: %s", exc)
         fused: dict[int, float] = {}
+        places: list[dict[int, int]] = [{index: rank for rank, index in enumerate(r)} for r in rankings]
         for ranking in rankings:
             for rank, index in enumerate(ranking):
                 fused[index] = fused.get(index, 0.0) + 1.0 / (RRF_K + rank + 1)
-        best = sorted(fused, key=lambda i: -fused[i])[:k]
-        return [self.sections[i] for i in best]
+        hits = []
+        for i in sorted(fused, key=lambda i: -fused[i])[:k]:
+            hit = Hit(self.sections[i], round(fused[i], 4), bm25_score=round(bm25_scores[i], 2))
+            if i in places[0]:
+                hit.bm25_rank = places[0][i] + 1
+            if len(places) > 1:
+                hit.vector_rank, hit.similarity = places[1][i] + 1, round(sims[i], 3)
+            hits.append(hit)
+        return hits
+
+    def search(self, query: str, k: int = 3) -> list[PolicySection]:
+        return [hit.section for hit in self.explain(query, k)]

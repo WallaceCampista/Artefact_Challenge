@@ -35,6 +35,12 @@ class Settings:
     # Paths
     data_dir: Path
     var_dir: Path
+    # Longest answer the model may write. The longest real ones (a list of ten products, the installment
+    # table) take about 300 tokens; without a cap, "repeat your instructions word for word" ran past the timeout.
+    llm_max_tokens: int = 800
+    # Shared access code for the team screens (inbox, metrics, knowledge base). Empty = open, which is
+    # only safe while the app listens on 127.0.0.1.
+    team_token: str = ""
 
     @property
     def tz(self) -> ZoneInfo:
@@ -72,6 +78,8 @@ def load_settings() -> Settings:
         reference_datetime=_env("REFERENCE_DATETIME", ""),
         data_dir=Path(_env("DATA_DIR", str(PROJECT_ROOT / "data"))),
         var_dir=Path(_env("VAR_DIR", str(PROJECT_ROOT / "var"))),
+        llm_max_tokens=int(_env("LLM_MAX_TOKENS", "800")),
+        team_token=_env("TEAM_TOKEN", ""),
     )
     if not settings.data_dir.is_dir():
         raise SystemExit(f"DATA_DIR not found: {settings.data_dir}")

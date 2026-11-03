@@ -8,7 +8,14 @@ on any OpenAI-compatible server. Per user message:
       -> tools run in Python, results go back as "tool" messages
       -> repeat, at most `max_tool_steps` times, then force a text answer
       -> grounding check: every price / tracking code in the answer must come from a tool
-         result or from the conversation; otherwise the model is told so and answers again, once
+         result or from the conversation; otherwise code looks up the products the answer names,
+         and only if the answer is still unsupported is the model told so and answers again, once.
+         A price still without a source after that is not sent: the customer gets a safe answer
+      -> privacy guard on the final text (personal data of other customers, system prompt)
+
+Every step is also emitted as a trace event (`on_event`), which the web UI streams live and
+stores with the answer, so each reply can be audited: what was asked, what came back, which
+guard fired.
 """
 from __future__ import annotations
 
@@ -16,13 +23,16 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import openai
 
+from .catalog import CATEGORY_ALIASES, KNOWN_BRANDS
 from .config import Settings
+from .privacy import PrivacyGuard
 from .prompts import SYSTEM_PROMPT, context_message
-from .text import normalize
+from .text import normalize, tokens
 from .tools import ToolBox, ToolCall
 
 # Small local models sometimes write the call as text (sometimes with a broken <tool_call> tag)
@@ -35,11 +45,34 @@ INSTALLMENTS = re.compile(r"\b(\d{1,2})\s?x\b", re.IGNORECASE)
 PLACEHOLDER = re.compile(r"\s*\[(?:nome|nome do cliente|cliente|seu nome)\]", re.IGNORECASE)
 PROMO = re.compile(r"(\d+)% de desconto \([^)]*\): de (R\$ [\d.,]+) por (R\$ [\d.,]+)")
 DAYS = re.compile(r"\b(\d+)(?:\s*(?:a|e|-)\s*(\d+))?\s+dias\b")
+# An unconditional yes at the start of an answer ("Claro que pode!"), after an optional greeting.
+UNVERIFIED_YES = re.compile(
+    r"^(?P<greeting>\s*(?:ol[aá]|oi)\b[^!.\n]{0,25}?[!,.]\s*)?"
+    r"(?:claro que (?:pode|sim)|sim,? (?:pode|claro)|pode sim|com certeza|sim(?=[!.]))[^,.!?\n]{0,25}?[,.!]\s*",
+    re.IGNORECASE)
+ASKS_FOR_ORDER = re.compile(r"n[uú]mero do (?:seu )?pedido", re.IGNORECASE)
+CLOSING_QUESTION = "Posso lhe ajudar com algo mais?"
+# The answer waits for data from the customer ("preciso do número do seu pedido"), on accent-free text.
+WAITING_FOR_DATA = re.compile(r"\bpreciso (?:do|da|de|dos|das)\b|\bme (?:informe|passe|diga|envie)\b"
+                              r"|\bpode me (?:informar|passar|dizer|enviar)\b|\bnumero do (?:seu )?pedido\b")
+# Qwen sometimes switches to Chinese mid-sentence. Cyrillic, Arabic, Japanese, Chinese and Korean scripts.
+OTHER_SCRIPT = re.compile(r"[\u0400-\u04ff\u0600-\u06ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+# "Está dentro do prazo" and its variants, on accent-free lowercase text.
+WITHIN_DEADLINE = re.compile(r"\bdentro d(?:e todos |os? |as? )?(?:os |seus )?prazos?\b|\bainda (?:esta|da|cabe) (?:no |dentro do )?prazo"
+                             r"|\bainda (?:pode|e possivel) (?:devolver|trocar|desistir)")
 GROUNDING_RETRIES = 1
+PRICE_LOOKUPS = 3  # products looked up by code when an answer quotes a price without a source
 
 FALLBACK_MESSAGE = (
     "Desculpe, estou com uma instabilidade no sistema agora. Tente de novo em instantes ou fale "
     "com a nossa equipe pelo (67) 3341-4444."
+)
+# Sent instead of an answer whose price or installment count has no source even after the rewrite.
+# Tested live: asked to fix invented prices without a lookup, the model invented other prices.
+UNVERIFIED_PRICE_MESSAGE = (
+    "Não consegui confirmar esse valor no nosso sistema e prefiro não te passar uma informação errada. "
+    "Pode me dizer a marca e o modelo do produto, ou reformular a pergunta, para eu consultar de novo? "
+    "Se preferir, encaminho sua dúvida para a nossa equipe."
 )
 
 
@@ -57,6 +90,17 @@ class Reply:
     completion_tokens: int = 0
     grounding_retries: int = 0
     ungrounded: list[str] = field(default_factory=list)  # still unsupported after the retry
+    redacted: list[str] = field(default_factory=list)  # personal data removed by the privacy guard
+    trace: list[dict] = field(default_factory=list)  # every step of this turn, in order
+    message_id: int | None = None  # set when the answer is persisted
+    listener: Callable[[dict], None] | None = field(default=None, repr=False)
+    started: float = field(default_factory=time.perf_counter, repr=False)
+
+    def emit(self, kind: str, **data) -> None:
+        event = {"type": kind, "ms": round((time.perf_counter() - self.started) * 1000), **data}
+        self.trace.append(event)
+        if self.listener is not None:
+            self.listener(event)
 
 
 def calls_from_text(content: str | None, known_tools: set[str]) -> list[dict]:
@@ -134,10 +178,79 @@ def hours_question(message: str) -> str | None:
     return None
 
 
-def _tool_hint(missing: list[str]) -> str:
+# "Vocês têm X?" about a category. Questions with a model name, a price, a policy, an order or an
+# accessory are left to the model: its own routing passes the evals there.
+CATALOG_INTENT = re.compile(r"\b(?:tem|tens|teem|vende\w*|trabalh\w*|quais|opcoes|list\w*|mostr\w*|tiver)\b")
+LISTING_INTENT = re.compile(r"\b(?:list\w*|mostr\w*|tiver|todos|todas|opcoes)\b")
+NOT_A_CATALOG_QUESTION = re.compile(
+    r"\b(?:pedido|compr\w*|chegou|devolv\w*|troc\w*|reclam\w*|garantia|frete|entreg\w*|prazo\w*|pix|parcel\w*|"
+    r"pag\w*|horario\w*|abert\w*|endereco|quanto|preco\w*|valor\w*|custa\w*|barat\w*|car[oa]s?|"
+    r"cordas?|palhetas?|cabos?|cases?|capas?|pedal|pedais|amplificador\w*|afinador\w*|encordoamento\w*|"
+    r"estantes?|correias?|baquetas?|acessorios?)\b")
+# "E se estiver com defeito?": the answer is in the manual (exchange, legal and manufacturer warranty).
+DEFECT_INTENT = re.compile(r"\b(?:defeit\w*|quebr\w*|estragad\w*|nao (?:funciona|liga)|zumbid\w*|trincad\w*|rachad\w*)\b")
+WANTS_HANDOFF = re.compile(r"\b(?:encaminh\w*|chamado|atendente|falar com)\b")
+PROMOTION_WORDS = {"promocao", "promocoes", "oferta", "ofertas", "desconto", "descontos", "liquidacao"}
+CATALOG_FILLER = {"ai", "aqui", "la", "algum", "alguma", "alguns", "algumas", "ainda", "disponivel", "disponiveis",
+                  "estoque", "venda", "nao", "orcamento", "instrumento", "instrumentos", "tipo", "tipos", "modelo",
+                  "modelos", "opcao", "opcoes", "todos", "todas", "hoje", "agora", "entao", "ok", "sim"}
+ALIAS_WORDS = {word for aliases in CATEGORY_ALIASES.values() for alias in aliases for word in alias.split()}
+
+
+def _category_question(text: str, store) -> dict | None:
+    norm = normalize(text)
+    if re.search(r"\d", norm) or not CATALOG_INTENT.search(norm) or NOT_A_CATALOG_QUESTION.search(norm):
+        return None
+    if store.products_mentioned(text):  # a model name: detalhes_produto territory
+        return None
+    padded = f" {norm} "
+    categories = {cid for cid, aliases in CATEGORY_ALIASES.items() if any(f" {a} " in padded for a in aliases)}
+    if len(categories) != 1:
+        return None
+    rest = [w for w in tokens(norm) if w not in ALIAS_WORDS and w not in CATALOG_FILLER and not CATALOG_INTENT.fullmatch(w)]
+    promotions = any(w in PROMOTION_WORDS for w in rest)
+    rest = [w for w in rest if w not in PROMOTION_WORDS]
+    brands = [b for b in KNOWN_BRANDS if f" {normalize(b)} " in padded]
+    if brands:
+        term = brands[0]
+    elif len(rest) <= 1:
+        term = rest[0] if rest else None  # "baixo da Cort" -> "cort", a brand the store may not sell
+    else:
+        return None  # several unknown words: a description the model reads better than this rule
+    arguments = {"categoria": store.categories[categories.pop()].name}
+    if term:
+        arguments["termo"] = term
+    if promotions:
+        arguments["apenas_promocoes"] = True
+    return arguments
+
+
+def catalog_search(message: str, previous: str | None, store) -> dict | None:
+    """buscar_produtos arguments when the customer asks what the store has in a category, else None:
+    "Baixo da Cort, vocês têm?" -> {"categoria": "Baixos", "termo": "cort"}. "Liste o que tiver" right
+    after it repeats the previous question. Tested live, the model asked for a budget twice and then
+    listed three Cort basses with prices; the store sells none."""
+    found = _category_question(message, store)
+    norm = normalize(message)
+    if found is None and previous and LISTING_INTENT.search(norm) and not re.search(r"\d", norm) \
+            and not NOT_A_CATALOG_QUESTION.search(norm):
+        found = _category_question(previous, store)
+    return found
+
+
+def _is_price(fact: str) -> bool:
+    """A money amount ("R$ 358,25") or an installment count ("12x") from ungrounded_facts."""
+    return fact.startswith("R$") or fact.endswith("x")
+
+
+def _tool_hint(missing: list[str], answer: str = "") -> str:
     hints = []
     if any(m.startswith("R$") for m in missing):
         hints.append("preços: detalhes_produto ou buscar_produtos")
+        if re.search(r"parcel|vezes|\d+\s?x\b", normalize(answer)):
+            # Live: the model divided the PIX price by 10 twice; card installments use the list price.
+            hints.append("valor de cada parcela: copie de parcelas_sem_juros (detalhes_produto), que é calculado "
+                         "sobre o preço de tabela; o desconto do PIX não vale no cartão")
     if any(m.endswith("x") for m in missing):
         hints.append("parcelas: detalhes_produto")
     if any(m.endswith(("%", "dias")) for m in missing):
@@ -145,6 +258,57 @@ def _tool_hint(missing: list[str]) -> str:
     if any(m.startswith("BR") for m in missing):
         hints.append("rastreio: consultar_pedido")
     return "consulte " + "; ".join(hints)
+
+
+def drop_unverified_yes(answer: str) -> tuple[str, str | None]:
+    """Removes a yes given before the order is checked: "Claro que pode! Me passe o número do pedido…"
+    becomes "Me passe o número do pedido…". The answer asking for the order number is the sign that
+    nothing was verified yet; whether a return is possible depends on deadlines the tool computes.
+    Returns the answer and the removed words (None if nothing changed)."""
+    match = UNVERIFIED_YES.match(answer) if ASKS_FOR_ORDER.search(answer) else None
+    rest = answer[match.end():] if match else ""
+    if not rest:
+        return answer, None
+    greeting = match.group("greeting") or ""
+    return greeting + rest[0].upper() + rest[1:], answer[len(greeting):match.end()].strip()
+
+
+def verdict_issues(answer: str, calls) -> list[str]:
+    """The answer says the order is within a deadline although consultar_pedido concluded that every store
+    deadline has ended. Seen live: with the conclusion in front of it, the model wrote the opposite."""
+    text = normalize(answer)
+    for call in calls:
+        conclusion = call.result.get("conclusao_prazos", "") if call.name == "consultar_pedido" else ""
+        if "TODOS os prazos da loja já terminaram" not in conclusion:
+            continue
+        for match in WITHIN_DEADLINE.finditer(text):
+            if not re.search(r"\bnao\b(?:\s+\w+){0,3}\s*$", text[:match.start()]):  # "não está dentro do prazo" is right
+                return [f'diz que o pedido está dentro do prazo, mas consultar_pedido concluiu: "{conclusion}"']
+    return []
+
+
+def tidy_closing(answer: str) -> str:
+    """Drops the closing question when the answer already ends by asking the customer something:
+    "Quer que eu encaminhe? Posso lhe ajudar com algo mais?" reads as two questions at once."""
+    stripped = answer.rstrip()
+    if not stripped.endswith(CLOSING_QUESTION):
+        return answer
+    before = stripped[: -len(CLOSING_QUESTION)].rstrip()
+    return before if before.endswith("?") or WAITING_FOR_DATA.search(normalize(before)) else answer
+
+
+def language_issues(answer: str) -> list[str]:
+    return ["tem trechos em outro idioma; escreva tudo em português do Brasil"] if OTHER_SCRIPT.search(answer) else []
+
+
+def cut_other_script(answer: str) -> str:
+    """Keeps the complete sentences before the first character in another script."""
+    match = OTHER_SCRIPT.search(answer)
+    if match is None:
+        return answer
+    head = answer[:match.start()]
+    end = max(head.rfind(mark) for mark in ".!?")
+    return head[:end + 1].strip() if end >= 0 else head.strip()
 
 
 def promotion_issues(answer: str, evidence: str) -> list[str]:
@@ -173,16 +337,20 @@ def session_facts(calls) -> list[str]:
 
 
 class Agent:
-    def __init__(self, settings: Settings, client: openai.OpenAI, tools: ToolBox):
+    def __init__(self, settings: Settings, client: openai.OpenAI, tools: ToolBox,
+                 guard: PrivacyGuard | None = None):
         self.settings = settings
         self.client = client
         self.tools = tools
+        self.guard = guard
         self.tool_names = {schema["function"]["name"] for schema in tools.schemas}
 
     def _complete(self, messages: list[dict], with_tools: bool, reply: Reply):
-        kwargs = dict(model=self.settings.llm_model, messages=messages, temperature=self.settings.llm_temperature)
+        kwargs = dict(model=self.settings.llm_model, messages=messages, temperature=self.settings.llm_temperature,
+                      max_tokens=self.settings.llm_max_tokens)
         if with_tools:
             kwargs["tools"] = self.tools.schemas
+        reply.emit("model_call", n=reply.model_calls + 1, tools_enabled=with_tools)
         try:
             response = self.client.chat.completions.create(**kwargs)
         except openai.OpenAIError as exc:
@@ -207,6 +375,7 @@ class Agent:
             for call in calls:
                 executed = self.tools.run(call["function"]["name"], call["function"]["arguments"])
                 reply.tool_calls.append(executed)
+                self._emit_tool(reply, executed, auto=False)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call["id"],
@@ -215,11 +384,17 @@ class Agent:
         # Step budget exhausted: answer with what was gathered, no more tools.
         return (self._complete(messages, with_tools=False, reply=reply).content or "").strip()
 
-    def _prefetch(self, messages: list[dict], reply: Reply, name: str, arguments: dict) -> None:
+    @staticmethod
+    def _emit_tool(reply: Reply, executed: ToolCall, auto: bool, reason: str | None = None) -> None:
+        reply.emit("tool", name=executed.name, arguments=executed.arguments, result=executed.result,
+                   duration_ms=round(executed.duration_ms, 1), auto=auto, reason=reason)
+
+    def _prefetch(self, messages: list[dict], reply: Reply, name: str, arguments: dict, reason: str) -> None:
         """Runs a tool on the model's behalf and adds it to the conversation as if the model had
         called it. Used where routing is narrow and the cost of a wrong answer is high."""
         executed = self.tools.run(name, arguments)
         reply.tool_calls.append(executed)
+        self._emit_tool(reply, executed, auto=True, reason=reason)
         call_id = f"auto-{len(reply.tool_calls)}"
         messages += [
             {"role": "assistant", "content": "", "tool_calls": [{
@@ -241,13 +416,32 @@ class Agent:
                 return found[0] if len(found) == 1 else None
         return None
 
+    def _look_up_products(self, messages: list[dict], reply: Reply, texts: list[str]) -> bool:
+        """Runs detalhes_produto for the catalog products named in the first of `texts` that names
+        any (the draft answer, then the message, then recent turns). True if something was looked up."""
+        store = getattr(self.tools, "store", None)
+        if store is None or "detalhes_produto" not in self.tool_names:
+            return False
+        known = {c.result.get("nome") for c in reply.tool_calls if c.name == "detalhes_produto"}
+        for text in texts:
+            products = [p for p in store.products_mentioned(text) if p.name not in known][:PRICE_LOOKUPS]
+            if products:
+                for product in products:
+                    self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name},
+                                   reason="grounding: price without a source")
+                return True
+        return False
+
     def respond(self, history: list[dict], message: str, session_id: str | None = None,
-                facts: list[str] | None = None) -> Reply:
+                facts: list[str] | None = None, on_event: Callable[[dict], None] | None = None) -> Reply:
         """Answers one user message. `history` holds previous {"role", "content"} text turns;
-        `facts` are what tools already established in this session (see session_facts)."""
+        `facts` are what tools already established in this session (see session_facts);
+        `on_event` receives each trace event as it happens."""
         started = time.perf_counter()
         self.tools.session_id = session_id
-        reply = Reply(text="")
+        reply = Reply(text="", listener=on_event, started=started)
+        reply.emit("context", now=self.settings.now().isoformat(timespec="minutes"), facts=facts or [],
+                   history_messages=len(history))
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},  # static: cacheable prefix
             *history,
@@ -265,42 +459,106 @@ class Agent:
         # answers from the weekly table (e.g. "come tomorrow 09-13" on a holiday). Asked in code.
         day = hours_question(message)
         if day and "consultar_horario" in self.tool_names:
-            self._prefetch(messages, reply, "consultar_horario", {"quando": day})
+            self._prefetch(messages, reply, "consultar_horario", {"quando": day},
+                           reason="pre-routing: opening hours on a given day")
+        # "Vocês têm baixo da Cort?": the prompt says to search before saying what the store has; the
+        # model sometimes answers from memory instead, inventing models and prices. Searched in code.
+        store = getattr(self.tools, "store", None)
+        if store is not None and "buscar_produtos" in self.tool_names:
+            previous = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
+            search = catalog_search(message, previous, store)
+            if search:
+                self._prefetch(messages, reply, "buscar_produtos", search,
+                               reason="pre-routing: what the store has in a category")
+        # A defect question ("e se estiver com defeito?") answered from memory got an invented home pickup in
+        # the recorded examples. The manual has the answer (4.2 exchange, 8.1 legal, 8.2 manufacturer warranty).
+        normalized = normalize(message)
+        if DEFECT_INTENT.search(normalized) and not WANTS_HANDOFF.search(normalized) \
+                and "consultar_politicas" in self.tool_names:
+            self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message},
+                           reason="pre-routing: defect or warranty question")
         # Payment of a product already discussed ("e no PIX, fica quanto?"): tool results are not
         # replayed between turns, so without a new lookup the model guesses installments.
         if PAYMENT_INTENT.search(normalize(message)):
             product = self._product_in_focus(history, message)
             if product is not None:
-                self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name})
+                self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name},
+                               reason="pre-routing: payment question about the product in focus")
+        # Team documents (knowledge base) cover topics the prompt never mentions; tested live, the
+        # model answered from the document's title in the tool description instead of calling the
+        # tool. When the best section for the question comes from one of them, read it for the model.
+        if self.tools.team_document_for(message):
+            self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message},
+                           reason="pre-routing: question about a team document")
 
         text = self._loop(messages, reply)
+        recent = [m["content"] for m in reversed(history)][:4]
         for attempt in range(GROUNDING_RETRIES + 1):
             results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
             missing = ungrounded_facts(text, conversation_text + results)
-            issues = promotion_issues(text, results)
+            issues = promotion_issues(text, results) + verdict_issues(text, reply.tool_calls) + language_issues(text)
+            # A price without a source is often right but unlooked-up: tool results are not replayed
+            # between turns, so "12x of the bass we discussed" has no evidence this turn. Look the
+            # product up first and check the same answer again; a rewrite once turned a correct
+            # R$ 358,25 into a wrong R$ 358,33.
+            lookups: list[dict] = []
+            if attempt < GROUNDING_RETRIES and any(_is_price(m) for m in missing) and \
+                    self._look_up_products(lookups, reply, [text, message, *recent]):
+                results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
+                missing = ungrounded_facts(text, conversation_text + results)
+                issues = promotion_issues(text, results) + verdict_issues(text, reply.tool_calls) + language_issues(text)
             if not (missing or issues) or attempt == GROUNDING_RETRIES:
                 reply.ungrounded = missing
+                outcome = "unresolved" if (missing or issues) else "pass"
+                if any(_is_price(m) for m in missing):
+                    # Decided in code: a price nobody can source never reaches the customer.
+                    text, outcome = UNVERIFIED_PRICE_MESSAGE, "withheld"
+                reply.emit("guard", check="grounding", outcome=outcome, details=missing + issues)
                 break
             reply.grounding_retries += 1
+            reply.emit("guard", check="grounding", outcome="retry", details=missing + issues)
             problems = issues + ([f"cita {', '.join(missing)}, que não aparece(m) em nenhum resultado de ferramenta "
-                                  f"desta conversa ({_tool_hint(missing)})"] if missing else [])
+                                  f"desta conversa ({_tool_hint(missing, text)})"] if missing else [])
             messages += [
                 {"role": "assistant", "content": text},
                 {"role": "system", "content": "Verificação automática da resposta acima: " + "; ".join(problems)
-                 + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas."},
+                 + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas. "
+                   "O cliente não viu a resposta acima: não peça desculpas por ela. Responda à última mensagem "
+                   f"do cliente: \"{message}\""},
+                *lookups,
             ]
             # Invented deadlines/percentages almost always mean the manual was not read: read it for the model.
             used = {c.name for c in reply.tool_calls}
             if any(m.endswith(("%", "dias")) for m in missing) and "consultar_politicas" not in used:
-                self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message})
+                self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message},
+                               reason="grounding: deadline or percentage without a source")
             text = self._loop(messages, reply)
 
         text = PLACEHOLDER.sub("", text).strip() or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
+        if OTHER_SCRIPT.search(text):  # still there after the rewrite: keep the Portuguese sentences before it
+            text = cut_other_script(text) or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
+            reply.emit("guard", check="language", outcome="trimmed", details=[])
+        text = tidy_closing(text)
+        # The prompt says not to promise a return before checking the order; the model still opens with
+        # "Claro que pode!" (stable across runs in the evals). Decided in code, like the protocol below.
+        if "consultar_pedido" not in {c.name for c in reply.tool_calls}:
+            text, promise = drop_unverified_yes(text)
+            if promise:
+                reply.emit("guard", check="promise", outcome="removed", details=[promise])
         # Critical information is guaranteed by code, not left to the model: the handoff protocol.
         for call in reply.tool_calls:
             protocol = call.result.get("protocolo") if call.name == "encaminhar_para_equipe" else None
             if protocol and protocol not in text:
                 text += f"\n\nSeu protocolo de atendimento é {protocol}. Nossa equipe retorna em até 24 horas úteis."
+                reply.emit("guard", check="protocol", outcome="appended", details=[protocol])
+        if self.guard is not None:
+            user_text = " ".join(m["content"] for m in history if m["role"] == "user") + " " + message
+            checked = self.guard.apply(text, user_text)
+            text, reply.redacted = checked.text, checked.redacted
+            if checked.prompt_leak:
+                reply.emit("guard", check="system_prompt", outcome="blocked", details=[])
+            elif checked.redacted:
+                reply.emit("guard", check="personal_data", outcome="redacted", details=checked.redacted)
         reply.text = text
         reply.latency_s = time.perf_counter() - started
         return reply

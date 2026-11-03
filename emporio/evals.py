@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
+import textwrap
 import time
-from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .agent import Agent, ModelUnavailable, session_facts
 from .app import build_agent
@@ -26,6 +29,52 @@ CASES = PROJECT_ROOT / "evals" / "cases.json"
 RETRIEVAL_CASES = PROJECT_ROOT / "evals" / "policy_retrieval.json"
 REPORT = PROJECT_ROOT / "evals" / "report.md"
 DEFAULT_NOW = "2026-11-03T10:30:00"
+# Guard outcomes that changed the final answer, as they appear in the report's notes.
+GUARD_NOTES = {
+    ("grounding", "retry"): "grounding retry",
+    ("grounding", "unresolved"): "grounding unresolved",
+    ("grounding", "withheld"): "price without a source withheld",
+    ("protocol", "appended"): "protocol added by code",
+    ("promise", "removed"): "unverified yes removed",
+    ("language", "trimmed"): "other-language text trimmed",
+    ("personal_data", "redacted"): "personal data masked",
+    ("system_prompt", "blocked"): "system prompt leak blocked",
+}
+
+
+CHECKS = ("expect_tools", "forbid_tools", "must_include", "must_not_include", "must_not_match")
+
+
+def cases_without_checks(cases: list[dict]) -> list[str]:
+    """Ids of cases that would pass whatever the agent says (e.g. a feedback draft not filled in yet)."""
+    return [case["id"] for case in cases if not any(case.get(key) for key in CHECKS)]
+
+
+def load_cases() -> list[dict]:
+    cases = json.loads(CASES.read_text(encoding="utf-8"))
+    empty = cases_without_checks(cases)
+    if empty:
+        raise SystemExit(f"{CASES.name}: {', '.join(empty)} has no checks yet. Write what the right answer must "
+                         f"(or must not) contain in must_include / must_not_include, or the tools in expect_tools.")
+    return cases
+
+
+def draft_case(feedback: dict, timezone: str) -> dict:
+    """A thumbs-down turned into an eval case: the customer's messages up to the rated answer, replayed
+    at the same store time. The checks are left empty on purpose: what was wrong is a person's call,
+    and load_cases refuses a case without checks, so a draft cannot pass by accident."""
+    now = feedback["simulated_now"]
+    if not now:  # real clock: the moment of the answer, in store time
+        now = datetime.fromisoformat(feedback["answered_at"]).astimezone(ZoneInfo(timezone))
+        now = now.replace(tzinfo=None).isoformat(timespec="seconds")
+    case_id = f"feedback_{feedback['id']}"
+    note = f"Rated down. Tom answered: \"{textwrap.shorten(feedback['answer'], 300, placeholder=' …')}\"."
+    if feedback.get("comment"):
+        note += f" Customer's comment: \"{feedback['comment']}\"."
+    note += (f" Tools used: {', '.join(feedback['tools']) or 'none'}. Fill must_include / must_not_include "
+             f"(or expect_tools), then run: python -m emporio eval --only {case_id}")
+    return {"id": case_id, "group": "feedback", "now": now, "turns": feedback["turns"],
+            "expect_tools": [], "must_include": [], "must_not_include": [], "note": note}
 
 
 def _norm(text: str) -> str:
@@ -52,6 +101,10 @@ def check_case(case: dict, answer: str, tools_used: list[str], ungrounded: list[
     for item in case.get("must_not_include", []):
         if _contains(answer, item):
             failures.append(f"must not say '{item}'")
+    for pattern in case.get("must_not_match", []):  # e.g. any e-mail address or phone number
+        found = re.search(pattern, answer, re.IGNORECASE)
+        if found:
+            failures.append(f"must not contain '{found.group(0)}'")
     if ungrounded:
         failures.append(f"ungrounded {ungrounded}")
     return failures
@@ -72,8 +125,32 @@ def run_retrieval(agent: Agent) -> dict:
     return scores
 
 
-def run_cases(settings: Settings, only: str | None = None) -> list[dict]:
-    cases = json.loads(CASES.read_text())
+def _run_once(agent: Agent, case: dict) -> dict:
+    history: list[dict] = []
+    trail: list = []
+    started = time.perf_counter()
+    try:
+        for turn in case["turns"]:  # same flow as ChatService.send, without the database
+            reply = agent.respond(history, turn, session_id=f"eval-{case['id']}", facts=session_facts(trail))
+            history += [{"role": "user", "content": turn}, {"role": "assistant", "content": reply.text}]
+            trail += reply.tool_calls
+    except ModelUnavailable as exc:
+        raise SystemExit(f"model unavailable: {exc}") from exc
+    tools_used = [c.name for c in reply.tool_calls]
+    failures = check_case(case, reply.text, tools_used, reply.ungrounded)
+    return {
+        "failures": failures, "tools": tools_used, "answer": reply.text, "retries": reply.grounding_retries,
+        "redactions": len(reply.redacted), "seconds": time.perf_counter() - started,
+        "guards": [GUARD_NOTES[key] for e in reply.trace if e["type"] == "guard"
+                   and (key := (e["check"], e["outcome"])) in GUARD_NOTES],
+        "routing_ok": not any(f.startswith(("expected", "must not call")) for f in failures),
+    }
+
+
+def run_cases(settings: Settings, only: str | None = None, repeat: int = 1) -> list[dict]:
+    """Runs every case `repeat` times. A case passes only if every run passes; with repeat > 1
+    the report also shows which cases are flaky (pass in some runs, fail in others)."""
+    cases = load_cases()
     if only:
         cases = [c for c in cases if c["id"] == only]
     agents: dict[str, Agent] = {}
@@ -82,42 +159,45 @@ def run_cases(settings: Settings, only: str | None = None) -> list[dict]:
         now = case.get("now", DEFAULT_NOW)
         if now not in agents:
             agents[now] = build_agent(dataclasses.replace(settings, reference_datetime=now))
-        agent = agents[now]
-        history: list[dict] = []
-        trail: list = []
-        started = time.perf_counter()
-        try:
-            for turn in case["turns"]:  # same flow as ChatService.send, without the database
-                reply = agent.respond(history, turn, session_id=f"eval-{case['id']}", facts=session_facts(trail))
-                history += [{"role": "user", "content": turn}, {"role": "assistant", "content": reply.text}]
-                trail += reply.tool_calls
-        except ModelUnavailable as exc:
-            raise SystemExit(f"model unavailable: {exc}") from exc
-        tools_used = [c.name for c in reply.tool_calls]
-        failures = check_case(case, reply.text, tools_used, reply.ungrounded)
+        runs = [_run_once(agents[now], case) for _ in range(repeat)]
+        passes = sum(not r["failures"] for r in runs)
+        shown = next((r for r in runs if r["failures"]), runs[0])  # show a failing run if any
         result = {
-            "id": case["id"], "group": case["group"], "passed": not failures, "failures": failures,
-            "tools": tools_used, "answer": reply.text, "retries": reply.grounding_retries,
-            "seconds": time.perf_counter() - started,
-            "routing_ok": not any(f.startswith(("expected", "must not call")) for f in failures),
+            "id": case["id"], "group": case["group"], "passed": passes == repeat, "passes": passes,
+            "runs": repeat, "failures": shown["failures"], "tools": shown["tools"], "answer": shown["answer"],
+            "retries": sum(r["retries"] for r in runs), "redactions": sum(r["redactions"] for r in runs),
+            "seconds": sum(r["seconds"] for r in runs) / repeat,
+            "routing_ok": all(r["routing_ok"] for r in runs),
+            "guards": {note: sum(note in r["guards"] for r in runs)
+                       for note in dict.fromkeys(n for r in runs for n in r["guards"])},
         }
         results.append(result)
-        mark = "PASS" if result["passed"] else "FAIL"
-        print(f"[{mark}] {case['id']:<24} {result['seconds']:5.1f}s  tools={tools_used}"
-              + (f"  -> {'; '.join(failures)}" if failures else ""), flush=True)
+        if repeat == 1:
+            mark = "PASS" if result["passed"] else "FAIL"
+        else:
+            mark = ("PASS" if passes == repeat else "FLAKY" if passes else "FAIL") + f" {passes}/{repeat}"
+        print(f"[{mark}] {case['id']:<26} {result['seconds']:5.1f}s  tools={result['tools']}"
+              + (f"  -> {'; '.join(result['failures'])}" if result["failures"] else ""), flush=True)
     return results
 
 
 def write_report(settings: Settings, retrieval: dict, results: list[dict]) -> str:
+    repeat = results[0]["runs"] if results else 1
     passed = sum(r["passed"] for r in results)
     routing = sum(r["routing_ok"] for r in results)
     retries = sum(r["retries"] for r in results)
+    redactions = sum(r["redactions"] for r in results)
     avg = sum(r["seconds"] for r in results) / max(len(results), 1)
+    runs_passed = sum(r["passes"] for r in results)
+    total_runs = sum(r["runs"] for r in results)
+    flaky = [r["id"] for r in results if 0 < r["passes"] < r["runs"]]
+    blocked = sum(r["guards"].get(GUARD_NOTES[("system_prompt", "blocked")], 0) for r in results)
     lines = [
         "# Evaluation report",
         "",
         f"Model: `{settings.llm_model}` · embeddings: `{settings.embedding_model or 'none'}` · "
-        f"temperature {settings.llm_temperature} · clock frozen at {DEFAULT_NOW} unless the case sets it",
+        f"temperature {settings.llm_temperature} · clock frozen at {DEFAULT_NOW} unless the case sets it"
+        + (f" · each case run {repeat} times" if repeat > 1 else ""),
         "",
         "## Policy retrieval (22 questions, top-3 sections)",
         "",
@@ -127,32 +207,46 @@ def write_report(settings: Settings, retrieval: dict, results: list[dict]) -> st
         "",
         "## Agent cases",
         "",
-        f"**{passed}/{len(results)} passed** · tool routing {routing}/{len(results)} · "
-        f"grounding retries {retries} · average {avg:.1f} s per case",
+        f"**{passed}/{len(results)} passed{' in every run' if repeat > 1 else ''}** · tool routing "
+        f"{routing}/{len(results)} · grounding retries {retries} · personal data redactions {redactions} · "
+        f"prompt leaks blocked {blocked} · "
+        f"average {avg:.1f} s per case",
+    ]
+    if repeat > 1:
+        lines += ["", f"Consistency: {runs_passed}/{total_runs} runs passed "
+                      f"({100 * runs_passed / total_runs:.0f}%) · flaky cases: {', '.join(flaky) or 'none'}"]
+    lines += [
         "",
         "| Case | Group | Result | Tools | Notes |",
         "|---|---|---|---|---|",
     ]
     for r in results:
-        notes = "; ".join(r["failures"]).replace("|", "/") or ("1 grounding retry" if r["retries"] else "")
-        lines.append(f"| `{r['id']}` | {r['group']} | {'pass' if r['passed'] else '**fail**'} | "
-                     f"{', '.join(r['tools']) or '-'} | {notes} |")
-    lines += ["", "## Answers", ""]
+        guards = [note + (f" {n}/{r['runs']}" if r["runs"] > 1 else "") for note, n in r["guards"].items()]
+        notes = "; ".join(r["failures"] + guards).replace("|", "/")
+        outcome = "pass" if r["passed"] else ("**flaky**" if r["passes"] else "**fail**")
+        if r["runs"] > 1:
+            outcome += f" {r['passes']}/{r['runs']}"
+        lines.append(f"| `{r['id']}` | {r['group']} | {outcome} | {', '.join(r['tools']) or '-'} | {notes} |")
+    lines += ["", "## Answers", "", "One run per case; a failing run is shown when there is one.", ""]
     for r in results:
         lines += [f"### {r['id']} ({'pass' if r['passed'] else 'fail'})", "", "> " + r["answer"].replace("\n", "\n> "), ""]
     return "\n".join(lines)
 
 
-def run_eval(settings: Settings, only: str | None = None, save: bool = True) -> int:
+def run_eval(settings: Settings, only: str | None = None, save: bool = True, repeat: int = 1) -> int:
+    load_cases()  # fail before the slow part when a case is not ready
     print(f"Model {settings.llm_model} at {settings.llm_base_url}\n")
     agent = build_agent(dataclasses.replace(settings, reference_datetime=DEFAULT_NOW))
     retrieval = run_retrieval(agent)
     for name, (h1, h3, n) in retrieval.items():
         print(f"policy retrieval [{name}]: hit@1 {h1}/{n}  hit@3 {h3}/{n}")
     print()
-    results = run_cases(settings, only)
+    results = run_cases(settings, only, repeat)
     passed = sum(r["passed"] for r in results)
-    print(f"\n{passed}/{len(results)} cases passed")
+    print(f"\n{passed}/{len(results)} cases passed" + (" in every run" if repeat > 1 else ""))
+    if repeat > 1:
+        runs_passed = sum(r["passes"] for r in results)
+        print(f"consistency: {runs_passed}/{sum(r['runs'] for r in results)} runs passed")
     if save and not only:
         REPORT.write_text(write_report(settings, retrieval, results), encoding="utf-8")
         print(f"report written to {REPORT.relative_to(PROJECT_ROOT)}")

@@ -88,3 +88,13 @@ def test_quality_report_finds_known_issues(store):
     assert "order 3: total" in findings and "order 20: total" in findings
     assert "bruno.martins@jmail.com" in findings
     assert "Cordas Orquestrais" in findings
+
+
+def test_products_are_recognized_by_brand_and_model_inside_a_sentence(store):
+    def names(text):
+        return [p.name for p in store.products_mentioned(text)]
+    assert names("Em 12x, o Yamaha Bass 3X fica R$ 358,25.") == ["Yamaha Bass 3X Electric Bass"]
+    assert names("o teclado Korg Synth 1 sai por") == ["Teclado Sintetizador Korg Synth 1 Pro"]
+    assert names("gostei do martin d28") == ["Martin D-28 Dreadnought Natural"]  # not the D-28E
+    assert names("Temos o Cort S-250HF por R$ 4.299,00.") == []  # not in the catalog
+    assert all(store.products_mentioned(p.name) for p in store.products.values())

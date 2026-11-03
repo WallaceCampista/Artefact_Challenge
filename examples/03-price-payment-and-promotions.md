@@ -6,18 +6,18 @@
 
 **Cliente:** Quanto custa o Takamine GD20?
 
-**Tom:** O Takamine GD20 Dreadnought Natural custa R$ 2.199,00 no nosso site. Se você pagar com PIX, terá um desconto de 5%, totalizando R$ 2.089,05.  
+**Tom:** O Takamine GD20 Dreadnought Natural custa R$ 2.199,00 no cartão de crédito. Com PIX, você paga R$ 2.089,05 com 5% de desconto.  
   
-Você pode optar também pelo cartão de crédito em até 12x sem juros, pagando R$ 183,25 por parcela. A opção de débito ou boleto bancário tem o valor integral do produto.  
+Você pode parcelar em até 12x sem juros no cartão, pagando R$ 183,25 por parcela. Ou escolher outras opções como 2 a 12 vezes com valores diferentes.  
   
-Qual forma de pagamento você preferiria?
+Posso lhe ajudar com algo mais?
 
-<details><summary>Tools used: detalhes_produto · 11.3 s</summary>
+<details><summary>Tools used: detalhes_produto · 7.8 s</summary>
 
 `detalhes_produto({"produto": "Takamine GD20"})`
 
 ```json
-{"id": 95, "nome": "Takamine GD20 Dreadnought Natural", "marca": "Takamine", "categoria": "Violões", "preco_de_tabela": "R$ 2.199,00", "preco_final": "R$ 2.199,00", "disponibilidade": "disponível", "estoque": 5, "descricao": "Violão dreadnought Takamine com tampo sólido em cedro. Excelente para fingerstyle com timbre quente e definido.", "especificacoes": {"tampo": "Cedro Sólido", "fundo e laterais": "Sapele", "braço": "Mogno", "cordas": "aço", "escala": "650mm", "eletrônica (captação)": "não", "cor": "Natural"}, "promocoes_encerradas": ["Oferta Especial (12%)"], "pagamento": {"pix": "R$ 2.089,05 (5% de desconto)", "cartao_de_credito": "até 12x de R$ 183,25 sem juros", "debito_ou_boleto": "R$ 2.199,00", "pode_combinar_pix_e_cartao": true}, "observacao": "As promoções em promocoes_encerradas NÃO estão valendo; se o cliente perguntar, diga que encerraram e informe o preço atual (regra …
+{"id": 95, "nome": "Takamine GD20 Dreadnought Natural", "marca": "Takamine", "categoria": "Violões", "preco_de_tabela": "R$ 2.199,00", "preco_final": "R$ 2.199,00", "disponibilidade": "disponível", "estoque": 5, "descricao": "Violão dreadnought Takamine com tampo sólido em cedro. Excelente para fingerstyle com timbre quente e definido.", "especificacoes": {"tampo": "Cedro Sólido", "fundo e laterais": "Sapele", "braço": "Mogno", "cordas": "aço", "escala": "650mm", "eletrônica (captação)": "não", "cor": "Natural"}, "promocoes_encerradas": ["Oferta Especial (12%)"], "pagamento": {"pix": "R$ 2.089,05 (5% de desconto)", "cartao_de_credito": "até 12x de R$ 183,25 sem juros", "parcelas_sem_juros": "2x de R$ 1.099,50; 3x de R$ 733,00; 4x de R$ 549,75; 5x de R$ 439,80; 6x de R$ 366,50; 7x de R$ 314,14; 8x de R$ 274,88; 9x de R$ 244,33; 10x de R$ 219,90; 11x de R$ 199,91; 12x de R$ 183,25", …
 ```
 
 </details>
@@ -26,18 +26,29 @@ Qual forma de pagamento você preferiria?
 
 **Cliente:** Se eu pagar no PIX fica quanto? E dá pra parcelar em quantas vezes?
 
-**Tom:** Se você pagar com PIX, terá um desconto de 5%, totalizando R$ 2.089,05.  
+**Tom:** Com PIX, você pagará R$ 2.089,05 com 5% de desconto.  
   
-Quanto à forma de pagamento, você pode optar por cartão de crédito em até 12x sem juros, ou débito/boleto bancário no valor integral do produto.  
+Você pode parcelar em até 12x no cartão sem juros:  
+- 2x de R$ 1.099,50  
+- 3x de R$ 733,00  
+- 4x de R$ 549,75  
+- 5x de R$ 439,80  
+- 6x de R$ 366,50  
+- 7x de R$ 314,14  
+- 8x de R$ 274,88  
+- 9x de R$ 244,33  
+- 10x de R$ 219,90  
+- 11x de R$ 199,91  
+- 12x de R$ 183,25  
   
-Qual opção você prefere?
+Posso lhe ajudar com algo mais?
 
-<details><summary>Tools used: detalhes_produto · 7.5 s</summary>
+<details><summary>Tools used: detalhes_produto · 11.2 s</summary>
 
 `detalhes_produto({"produto": "Takamine GD20 Dreadnought Natural"})`
 
 ```json
-{"id": 95, "nome": "Takamine GD20 Dreadnought Natural", "marca": "Takamine", "categoria": "Violões", "preco_de_tabela": "R$ 2.199,00", "preco_final": "R$ 2.199,00", "disponibilidade": "disponível", "estoque": 5, "descricao": "Violão dreadnought Takamine com tampo sólido em cedro. Excelente para fingerstyle com timbre quente e definido.", "especificacoes": {"tampo": "Cedro Sólido", "fundo e laterais": "Sapele", "braço": "Mogno", "cordas": "aço", "escala": "650mm", "eletrônica (captação)": "não", "cor": "Natural"}, "promocoes_encerradas": ["Oferta Especial (12%)"], "pagamento": {"pix": "R$ 2.089,05 (5% de desconto)", "cartao_de_credito": "até 12x de R$ 183,25 sem juros", "debito_ou_boleto": "R$ 2.199,00", "pode_combinar_pix_e_cartao": true}, "observacao": "As promoções em promocoes_encerradas NÃO estão valendo; se o cliente perguntar, diga que encerraram e informe o preço atual (regra …
+{"id": 95, "nome": "Takamine GD20 Dreadnought Natural", "marca": "Takamine", "categoria": "Violões", "preco_de_tabela": "R$ 2.199,00", "preco_final": "R$ 2.199,00", "disponibilidade": "disponível", "estoque": 5, "descricao": "Violão dreadnought Takamine com tampo sólido em cedro. Excelente para fingerstyle com timbre quente e definido.", "especificacoes": {"tampo": "Cedro Sólido", "fundo e laterais": "Sapele", "braço": "Mogno", "cordas": "aço", "escala": "650mm", "eletrônica (captação)": "não", "cor": "Natural"}, "promocoes_encerradas": ["Oferta Especial (12%)"], "pagamento": {"pix": "R$ 2.089,05 (5% de desconto)", "cartao_de_credito": "até 12x de R$ 183,25 sem juros", "parcelas_sem_juros": "2x de R$ 1.099,50; 3x de R$ 733,00; 4x de R$ 549,75; 5x de R$ 439,80; 6x de R$ 366,50; 7x de R$ 314,14; 8x de R$ 274,88; 9x de R$ 244,33; 10x de R$ 219,90; 11x de R$ 199,91; 12x de R$ 183,25", …
 ```
 
 </details>
@@ -46,16 +57,14 @@ Qual opção você prefere?
 
 **Cliente:** Tem algum violão em promoção?
 
-**Tom:** Sim, temos dois violões em promoção:  
+**Tom:** Aqui estão as opções em promoção:  
   
-1. **Crafter HT-100 Folk Aço Natural**: Com desconto de 18%, sai por R$ 1.967,18 (preço original: R$ 2.399,00).  
-2. **Taylor 110e Dreadnought Natural**: Com desconto de 8%, sai por R$ 5.519,08 (preço original: R$ 5.999,00).  
+1. **Crafter HT-100 Folk Aço Natural** - De R$ 2.399,00 por R$ 1.967,18 (18% de desconto)  
+2. **Taylor 110e Dreadnought Natural** - De R$ 5.999,00 por R$ 5.519,08 (8% de desconto)  
   
-Ambos estão disponíveis para compra. Se você pagar com PIX, terá um desconto adicional de 5%, mas só em produtos sem promoção.  
-  
-Qual desses modelos te interessa?
+Posso lhe ajudar com algo mais?
 
-<details><summary>Tools used: buscar_produtos · 23.2 s</summary>
+<details><summary>Tools used: buscar_produtos · 6.7 s</summary>
 
 `buscar_produtos({"categoria": "Violões", "apenas_promocoes": true})`
 

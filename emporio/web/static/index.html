@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Empório da Música · Tom</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%237E2F4F'/><path d='M13 22V9l9-2v13' stroke='white' stroke-width='2.2' fill='none'/><circle cx='11' cy='22' r='2.6' fill='white'/><circle cx='20' cy='20' r='2.6' fill='white'/></svg>">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="wordmark">Empório da Música</span>
+      <span class="brand-sub">Tom, atendente virtual</span>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Telas">
+      <button role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="true">Conversa</button>
+      <button role="tab" id="tab-inbox" aria-controls="view-inbox" aria-selected="false">Chamados <span class="count" id="inbox-count" hidden></span></button>
+      <button role="tab" id="tab-metrics" aria-controls="view-metrics" aria-selected="false">Métricas</button>
+      <button role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false">Base de conhecimento</button>
+    </nav>
+    <!-- Test controls for whoever runs the demo; the customer's view is the chat panel only -->
+    <div class="ops">
+      <label class="clock-control" id="clock-control" title="Controle de teste: simula a data e a hora da loja para experimentar feriados e horários">
+        <span>Relógio da loja</span>
+        <select id="clock"></select>
+      </label>
+      <div class="model-status" id="model-status" title="Status do servidor do modelo">
+        <span class="dot" aria-hidden="true"></span><span id="model-label">Verificando o modelo…</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Conversation: the customer's chat on the left, what Tom did on the right -->
+    <section id="view-chat" role="tabpanel" aria-labelledby="tab-chat" class="view view-chat">
+      <div class="chat">
+        <div class="chat-head">
+          <div class="avatar" aria-hidden="true">T</div>
+          <div>
+            <div class="chat-title">Tom</div>
+            <div class="chat-presence" id="presence">Online</div>
+          </div>
+          <button class="ghost" id="new-chat" type="button">Nova conversa</button>
+        </div>
+        <ol class="messages" id="messages" aria-live="polite" aria-label="Conversa"></ol>
+        <form class="composer" id="composer" autocomplete="off">
+          <label class="visually-hidden" for="input">Mensagem</label>
+          <textarea id="input" rows="1" maxlength="2000" placeholder="Escreva sua mensagem…"></textarea>
+          <button type="submit" id="send" class="send" aria-label="Enviar mensagem">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 11.5 21 3l-6.5 18-3-7.5L3 11.5Z" fill="currentColor"/></svg>
+          </button>
+        </form>
+      </div>
+
+      <aside class="trace" aria-labelledby="trace-title">
+        <div class="trace-head">
+          <h2 id="trace-title">Como o Tom respondeu</h2>
+          <p class="trace-question" id="trace-question"></p>
+        </div>
+        <div id="trace-empty" class="empty">
+          <p>Envie uma mensagem, ou escolha uma resposta na conversa, para ver cada passo por trás dela: cada chamada ao modelo, cada ferramenta usada com os dados que voltaram e as verificações feitas na resposta antes de o cliente vê-la.</p>
+        </div>
+        <div id="trace-body" hidden>
+          <div class="stats" id="trace-stats"></div>
+          <figure class="roll" aria-label="Linha do tempo da resposta">
+            <div class="roll-grid" id="roll"></div>
+            <figcaption class="roll-legend">
+              <span><i class="sw sw-model"></i>Chamada ao modelo</span>
+              <span><i class="sw sw-tool"></i>Ferramenta chamada pelo modelo</span>
+              <span><i class="sw sw-auto"></i>Ferramenta executada pelo código antes do modelo (pré-roteamento)</span>
+            </figcaption>
+          </figure>
+          <ol class="steps" id="steps"></ol>
+        </div>
+      </aside>
+    </section>
+
+    <!-- Team inbox: tickets opened by Tom for the human team -->
+    <section id="view-inbox" role="tabpanel" aria-labelledby="tab-inbox" class="view view-inbox" hidden>
+      <div class="inbox-list">
+        <div class="list-head">
+          <h2>Chamados</h2>
+          <div class="segmented" role="group" aria-label="Filtrar chamados">
+            <button type="button" data-status="open" aria-pressed="true">Abertos</button>
+            <button type="button" data-status="resolved" aria-pressed="false">Resolvidos</button>
+            <button type="button" data-status="" aria-pressed="false">Todos</button>
+          </div>
+        </div>
+        <ul id="tickets" class="tickets"></ul>
+      </div>
+      <div class="ticket-detail" id="ticket-detail">
+        <div class="empty"><p>Escolha um chamado para ler a conversa que levou a ele. O Tom abre um chamado em reclamações, devoluções que o cliente quer seguir, pedidos atrasados e sempre que alguém pede para falar com uma pessoa.</p></div>
+      </div>
+    </section>
+
+    <!-- Metrics computed from the stored conversations -->
+    <section id="view-metrics" role="tabpanel" aria-labelledby="tab-metrics" class="view view-metrics" hidden>
+      <div class="metrics-head">
+        <h2>Desempenho do agente</h2>
+        <button class="ghost" type="button" id="refresh-metrics">Atualizar</button>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="metrics-grid">
+        <figure class="panel">
+          <figcaption><h3>Uso das ferramentas</h3><p>Quantas vezes cada ferramenta foi usada, pelo modelo ou pelo pré-roteamento.</p></figcaption>
+          <div id="tool-bars" class="bars"></div>
+        </figure>
+        <figure class="panel">
+          <figcaption><h3>Verificações que mudaram uma resposta</h3><p>Cada vez que uma verificação pediu reescrita, removeu dados ou acrescentou o protocolo.</p></figcaption>
+          <table class="guard-table" id="guard-table"></table>
+        </figure>
+      </div>
+      <section class="panel feedback-panel" aria-labelledby="feedback-title">
+        <h3 id="feedback-title">Respostas marcadas como não úteis</h3>
+        <p class="panel-note">Cada 👎 pode virar um caso de avaliação. O rascunho repete as mensagens do cliente no mesmo horário da loja; falta só escrever o que a resposta certa precisa ter.</p>
+        <ol class="feedback-list" id="feedback-list"></ol>
+      </section>
+    </section>
+
+    <!-- Shown instead of a team screen when the server requires an access code (TEAM_TOKEN) -->
+    <section id="view-locked" role="tabpanel" class="view view-locked" hidden>
+      <form class="lock" id="team-form" autocomplete="off">
+        <h2>Área da equipe</h2>
+        <p>Chamados, métricas e a base de conhecimento mostram contatos de clientes e mudam o que o Tom consulta. Digite o código de acesso da equipe para continuar.</p>
+        <label class="field">
+          <span>Código de acesso</span>
+          <input type="password" id="team-code" autocomplete="current-password">
+        </label>
+        <p class="form-error" id="team-error" role="alert" hidden></p>
+        <button type="submit" class="primary">Entrar</button>
+        <p class="hint">O código fica guardado só nesta aba do navegador.</p>
+      </form>
+    </section>
+
+    <!-- Knowledge base: the store manual plus team documents, how they were split, and what a question retrieves -->
+    <section id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" class="view view-knowledge" hidden>
+      <div class="kb-side">
+        <div class="list-head"><h2>Documentos</h2></div>
+        <p class="kb-index" id="kb-index"></p>
+        <ul class="docs" id="kb-docs"></ul>
+
+        <form class="kb-add" id="kb-form" novalidate>
+          <h3>Adicionar documento</h3>
+          <p class="hint">Markdown, texto ou PDF, até 2 MB. O documento é dividido em trechos pelos títulos ou pela numeração das seções, e o Tom passa a consultá-lo junto com o manual.</p>
+          <label class="dropzone" id="kb-drop">
+            <input type="file" id="kb-file" accept=".md,.markdown,.txt,.pdf,text/markdown,text/plain,application/pdf" class="visually-hidden">
+            <span class="drop-main" id="kb-file-label">Arraste um arquivo para cá ou clique para escolher</span>
+            <span class="drop-note" id="kb-file-note"></span>
+          </label>
+          <details class="paste" id="kb-paste">
+            <summary>Ou cole o texto</summary>
+            <label class="visually-hidden" for="kb-text">Texto do documento</label>
+            <textarea id="kb-text" rows="6" maxlength="500000" placeholder="Cole aqui o texto do documento…"></textarea>
+          </details>
+          <label class="field">
+            <span>Título</span>
+            <input type="text" id="kb-title" maxlength="80" placeholder="Se ficar em branco, uso o título do arquivo">
+          </label>
+          <p class="form-error" id="kb-error" role="alert" hidden></p>
+          <button type="submit" class="primary" id="kb-submit">Indexar documento</button>
+          <ol class="steps kb-steps" id="kb-steps" aria-live="polite" hidden></ol>
+        </form>
+      </div>
+
+      <div class="kb-main">
+        <section class="panel kb-search" aria-labelledby="kb-search-title">
+          <h3 id="kb-search-title">Testar a busca</h3>
+          <p class="panel-note" id="kb-search-note">Escreva uma pergunta de cliente e veja os trechos que a busca encontra, com a posição de cada um no BM25 e nos embeddings.</p>
+          <form class="search-row" id="kb-search">
+            <label class="visually-hidden" for="kb-query">Pergunta</label>
+            <input type="search" id="kb-query" maxlength="500" placeholder="Ex.: posso trocar um violão comprado na promoção?">
+            <button type="submit" class="ghost">Buscar</button>
+          </form>
+          <ol class="hits" id="kb-hits" aria-live="polite"></ol>
+        </section>
+        <section class="panel kb-detail" id="kb-detail" aria-live="polite"></section>
+      </div>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
