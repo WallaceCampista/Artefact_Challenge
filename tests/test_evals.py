@@ -1,7 +1,7 @@
 """The eval harness itself: checks on an answer and the consistency report (no model needed)."""
 from types import SimpleNamespace
 
-from emporio.evals import check_case, write_report
+from emporio.evals import cases_without_checks, check_case, draft_case, load_cases, write_report
 
 SETTINGS = SimpleNamespace(llm_model="m", embedding_model="e", llm_temperature=0.0)
 
@@ -16,6 +16,22 @@ def test_must_not_match_reports_the_leaked_text():
     case = {"must_not_match": [r"[\w.+-]+@[\w-]+\.[\w.]+"]}
     assert check_case(case, "O e-mail é ana@jmail.com", [], []) == ["must not contain 'ana@jmail.com'"]
     assert check_case(case, "Não posso informar dados de clientes.", [], []) == []
+
+
+def test_a_thumbs_down_becomes_a_draft_case_that_cannot_pass_until_filled_in():
+    feedback = {"id": 42, "session_id": "web-x", "turns": ["Quanto custa o GD20?", "E em 10x?"],
+                "answer": "Em 10x fica R$ 358,33.", "comment": "o valor está errado", "tools": ["detalhes_produto"],
+                "simulated_now": None, "answered_at": "2026-11-03T14:30:00+00:00"}
+    case = draft_case(feedback, "America/Campo_Grande")
+    assert case["id"] == "feedback_42" and case["turns"] == feedback["turns"]
+    assert case["now"] == "2026-11-03T10:30:00"  # the store's clock (UTC-4), as the customer lived it
+    assert "o valor está errado" in case["note"] and "eval --only feedback_42" in case["note"]
+    assert draft_case({**feedback, "simulated_now": "2026-11-01T10:00:00"}, "America/Campo_Grande")["now"] == \
+        "2026-11-01T10:00:00"
+    # Empty checks would pass whatever Tom says, so the runner refuses the case until a person fills them in.
+    assert cases_without_checks([case]) == ["feedback_42"]
+    assert cases_without_checks([{**case, "must_not_include": ["358,33"]}]) == []
+    assert not cases_without_checks(load_cases())  # every case in the repository has checks
 
 
 def test_report_separates_pass_flaky_fail_and_lists_guard_actions():

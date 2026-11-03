@@ -8,12 +8,13 @@ Thin layer over ChatService, so the web, the CLI and the evals run exactly the s
     POST /api/chat                  one turn, JSON answer
     POST /api/chat/stream           one turn as Server-Sent Events: trace events live, then the answer
     GET  /api/sessions/{id}         transcript with per-answer trace and metrics
-    POST /api/feedback              thumbs up/down on an answer
+    POST /api/feedback              thumbs up/down on an answer, with an optional comment
 
 Team screens (need the X-Team-Token header when TEAM_TOKEN is set):
     GET  /api/handoffs              tickets for the human team (?status=open|resolved)
     POST /api/handoffs/{p}/resolve  close a ticket
     GET  /api/metrics               operational metrics from the stored conversations
+    GET  /api/feedback/cases        answers rated down, each with a draft eval case
     GET  /api/knowledge             the index: store manual + team documents
     POST /api/knowledge             add a document (Markdown, text or PDF), reviewed and indexed
     GET  /api/knowledge/manual      the manual's sections, as the agent receives them
@@ -45,6 +46,7 @@ from pydantic import BaseModel, Field
 from ..agent import FALLBACK_MESSAGE, ModelUnavailable, Reply
 from ..app import AGENT_SECTIONS, POLICY_PDF, ChatService, parse_clock
 from ..config import Settings
+from ..evals import draft_case
 from ..knowledge import MAX_BYTES, DuplicateDocument
 from ..policies import PolicySection
 
@@ -225,6 +227,12 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
     @app.get("/api/metrics", dependencies=team)
     def metrics():
         return service.analytics.summary()
+
+    @app.get("/api/feedback/cases", dependencies=team)
+    def feedback_cases():
+        items = reversed(service.feedback.negatives())  # newest first
+        return {"cases": [{**item, "turn": len(item["turns"]), "case": draft_case(item, settings.timezone)}
+                          for item in items]}
 
     @app.get("/api/knowledge", dependencies=team)
     def knowledge():

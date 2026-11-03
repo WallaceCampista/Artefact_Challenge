@@ -191,14 +191,25 @@ class FeedbackStore:
         return True
 
     def negatives(self) -> list[dict]:
-        """Answers rated down, with the question that produced them: candidates for new eval cases."""
+        """Answers rated down, with the conversation that led to them: candidates for new eval cases.
+        `turns` holds every customer message of the session up to the rated answer, so the case
+        can replay it; `simulated_now` and `answered_at` give the store time it happened."""
         rows = self.db.query(
-            "SELECT a.id, a.session_id, a.content AS answer, f.comment, "
-            "(SELECT q.content FROM messages q WHERE q.session_id = a.session_id AND q.id < a.id "
-            " AND q.role = 'user' ORDER BY q.id DESC LIMIT 1) AS question "
+            "SELECT a.id, a.session_id, a.content AS answer, a.tool_calls, a.simulated_now, "
+            "a.created_at AS answered_at, f.comment, f.created_at AS rated_at "
             "FROM feedback f JOIN messages a ON a.id = f.message_id WHERE f.rating = 'down' ORDER BY f.id"
         )
-        return [dict(r) for r in rows]
+        items = []
+        for r in rows:
+            turns = [q["content"] for q in self.db.query(
+                "SELECT content FROM messages WHERE session_id = ? AND id < ? AND role = 'user' ORDER BY id",
+                (r["session_id"], r["id"]))]
+            item = {key: r[key] for key in ("id", "session_id", "answer", "simulated_now", "answered_at",
+                                            "comment", "rated_at")}
+            item.update(turns=turns, question=turns[-1] if turns else "",
+                        tools=[c["name"] for c in json.loads(r["tool_calls"])] if r["tool_calls"] else [])
+            items.append(item)
+        return items
 
 
 class SqliteHandoffDesk:

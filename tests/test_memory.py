@@ -71,6 +71,22 @@ def test_metrics_feedback_and_ticket_resolution(tmp_path):
     assert transcript[1]["trace"] == trace and transcript[1]["rating"] == "down"
 
 
+def test_negative_feedback_keeps_the_conversation_up_to_the_rated_answer(tmp_path):
+    from emporio.memory import FeedbackStore
+
+    db = Database(tmp_path / "m.db")
+    conversations, feedback = ConversationStore(db), FeedbackStore(db)
+    conversations.save_exchange("s1", "Quanto custa o GD20?", "R$ 2.199,00.", [ToolCall("detalhes_produto", {}, {}, 1.0)])
+    rated = conversations.save_exchange("s1", "E em 10x?", "R$ 358,33.", [ToolCall("detalhes_produto", {}, {}, 1.0)],
+                                        {"simulated_now": "2026-11-03T10:30:00"})
+    conversations.save_exchange("s1", "Obrigado", "Por nada!", [])  # after the rated answer: not part of the case
+    feedback.rate(rated, "down", "o valor está errado")
+    [item] = feedback.negatives()
+    assert item["turns"] == ["Quanto custa o GD20?", "E em 10x?"] and item["question"] == "E em 10x?"
+    assert item["tools"] == ["detalhes_produto"] and item["comment"] == "o valor está errado"
+    assert item["simulated_now"] == "2026-11-03T10:30:00" and item["answered_at"] and item["rated_at"]
+
+
 def test_old_databases_are_migrated_in_place(tmp_path):
     import sqlite3
 

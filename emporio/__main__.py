@@ -28,7 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="start the web app and HTTP API")
     serve.add_argument("--host", default="127.0.0.1", help="interface to bind (0.0.0.0 in Docker)")
     serve.add_argument("--port", type=int, default=8000)
-    sub.add_parser("feedback", help="list answers rated down in the web app (candidates for eval cases)")
+    feedback = sub.add_parser("feedback", help="list answers rated down in the web app (candidates for eval cases)")
+    feedback.add_argument("--cases", action="store_true", help="print them as draft cases for evals/cases.json")
 
     args = parser.parse_args(argv)
     settings = load_settings()
@@ -72,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "feedback":
         from .cli import print_negative_feedback
 
-        print_negative_feedback(settings)
+        print_negative_feedback(settings, as_cases=args.cases)
         return 0
 
     if args.command == "chat":

@@ -14,7 +14,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import textwrap
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .agent import Agent, ModelUnavailable, session_facts
 from .app import build_agent
@@ -37,6 +40,41 @@ GUARD_NOTES = {
     ("personal_data", "redacted"): "personal data masked",
     ("system_prompt", "blocked"): "system prompt leak blocked",
 }
+
+
+CHECKS = ("expect_tools", "forbid_tools", "must_include", "must_not_include", "must_not_match")
+
+
+def cases_without_checks(cases: list[dict]) -> list[str]:
+    """Ids of cases that would pass whatever the agent says (e.g. a feedback draft not filled in yet)."""
+    return [case["id"] for case in cases if not any(case.get(key) for key in CHECKS)]
+
+
+def load_cases() -> list[dict]:
+    cases = json.loads(CASES.read_text(encoding="utf-8"))
+    empty = cases_without_checks(cases)
+    if empty:
+        raise SystemExit(f"{CASES.name}: {', '.join(empty)} has no checks yet. Write what the right answer must "
+                         f"(or must not) contain in must_include / must_not_include, or the tools in expect_tools.")
+    return cases
+
+
+def draft_case(feedback: dict, timezone: str) -> dict:
+    """A thumbs-down turned into an eval case: the customer's messages up to the rated answer, replayed
+    at the same store time. The checks are left empty on purpose: what was wrong is a person's call,
+    and load_cases refuses a case without checks, so a draft cannot pass by accident."""
+    now = feedback["simulated_now"]
+    if not now:  # real clock: the moment of the answer, in store time
+        now = datetime.fromisoformat(feedback["answered_at"]).astimezone(ZoneInfo(timezone))
+        now = now.replace(tzinfo=None).isoformat(timespec="seconds")
+    case_id = f"feedback_{feedback['id']}"
+    note = f"Rated down. Tom answered: \"{textwrap.shorten(feedback['answer'], 300, placeholder=' …')}\"."
+    if feedback.get("comment"):
+        note += f" Customer's comment: \"{feedback['comment']}\"."
+    note += (f" Tools used: {', '.join(feedback['tools']) or 'none'}. Fill must_include / must_not_include "
+             f"(or expect_tools), then run: python -m emporio eval --only {case_id}")
+    return {"id": case_id, "group": "feedback", "now": now, "turns": feedback["turns"],
+            "expect_tools": [], "must_include": [], "must_not_include": [], "note": note}
 
 
 def _norm(text: str) -> str:
@@ -112,7 +150,7 @@ def _run_once(agent: Agent, case: dict) -> dict:
 def run_cases(settings: Settings, only: str | None = None, repeat: int = 1) -> list[dict]:
     """Runs every case `repeat` times. A case passes only if every run passes; with repeat > 1
     the report also shows which cases are flaky (pass in some runs, fail in others)."""
-    cases = json.loads(CASES.read_text())
+    cases = load_cases()
     if only:
         cases = [c for c in cases if c["id"] == only]
     agents: dict[str, Agent] = {}
@@ -196,6 +234,7 @@ def write_report(settings: Settings, retrieval: dict, results: list[dict]) -> st
 
 
 def run_eval(settings: Settings, only: str | None = None, save: bool = True, repeat: int = 1) -> int:
+    load_cases()  # fail before the slow part when a case is not ready
     print(f"Model {settings.llm_model} at {settings.llm_base_url}\n")
     agent = build_agent(dataclasses.replace(settings, reference_datetime=DEFAULT_NOW))
     retrieval = run_retrieval(agent)

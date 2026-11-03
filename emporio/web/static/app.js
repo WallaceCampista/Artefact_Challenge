@@ -110,6 +110,7 @@ const seconds = (ms) => (ms === null || ms === undefined ? "–" : `${(ms / 1000
 const number = (n) => (n === null || n === undefined ? "–" : n.toLocaleString("pt-BR"));
 const json = (value) => JSON.stringify(value, null, 2);
 const plural = (n, one, many) => (n === 1 ? one : many);
+const shorten = (text, n) => (text.length > n ? `${text.slice(0, n).replace(/\s+\S*$/, "")} …` : text);
 const took = (ms) => (ms < 1 ? "menos de 1 ms" : `${number(ms)} ms`);
 // "2026-11-03T10:30:00-04:00" -> "03/11/2026 10:30" (store time, as the store reads it)
 const storeTime = (iso, withYear = true) => {
@@ -192,10 +193,33 @@ function feedbackButton(turn, rating, label) {
       try {
         await api("/api/feedback", { method: "POST", body: JSON.stringify({ message_id: turn.id, rating }) });
         turn.rating = rating;
+        turn.askComment = rating === "down" && !turn.commented;  // a 👎 asks what was missing (optional)
         renderMessages();
+        if (turn.askComment) $(`#comment-${turn.id}`).focus();
       } catch (error) { console.warn(error); }
     },
   }, thumb(rating === "down"));
+}
+
+// After a 👎: one optional line about what was missing. It goes to the team with the rating and
+// ends up in the draft eval case (Métricas → Respostas marcadas como não úteis).
+function commentForm(turn) {
+  if (turn.commented) return el("p", { class: "comment-sent", text: "Comentário enviado para a equipe." });
+  if (!turn.askComment) return null;
+  return el("form", { class: "comment-form", onsubmit: async (event) => {
+      event.preventDefault();
+      const comment = $(`#comment-${turn.id}`).value.trim();
+      if (!comment) { turn.askComment = false; renderMessages(); return; }
+      try {
+        await api("/api/feedback", { method: "POST", body: JSON.stringify({ message_id: turn.id, rating: "down", comment }) });
+        turn.askComment = false;
+        turn.commented = true;
+        renderMessages();
+      } catch (error) { console.warn(error); }
+    } },
+    el("label", { class: "visually-hidden", for: `comment-${turn.id}`, text: "O que faltou nesta resposta?" }),
+    el("input", { id: `comment-${turn.id}`, type: "text", maxlength: "500", placeholder: "O que faltou nesta resposta? (opcional)" }),
+    el("button", { type: "submit", class: "ghost" }, "Enviar"));
 }
 
 function renderMessages() {
@@ -221,6 +245,7 @@ function renderMessages() {
           turn.id ? feedbackButton(turn, "up", "Resposta útil") : null,
           turn.id ? feedbackButton(turn, "down", "Resposta não ajudou") : null,
         ));
+        if (turn.id) tom.append(commentForm(turn) || "");
       }
     }
     list.append(tom);
@@ -571,6 +596,59 @@ async function loadMetrics() {
   for (const [key, n] of rows) {
     const [check, outcome] = key.split(":");
     table.append(el("tr", {}, el("td", { text: guardTitle({ check, outcome }) }), el("td", { text: String(n) })));
+  }
+  loadNegatives();
+}
+
+// Answers rated down, each with a draft eval case: the customer's messages replayed at the same store time.
+async function loadNegatives() {
+  const list = $("#feedback-list");
+  let cases;
+  try {
+    ({ cases } = await api("/api/feedback/cases"));
+  } catch (error) {
+    list.replaceChildren(el("li", { class: "empty", text: `Não foi possível carregar as avaliações: ${error.message}` }));
+    return;
+  }
+  list.replaceChildren();
+  if (!cases.length) {
+    list.append(el("li", { class: "empty", text: "Nenhuma resposta marcada como não útil. Quando um cliente tocar em 👎, a resposta aparece aqui, pronta para virar um caso de avaliação." }));
+  }
+  for (const item of cases) {
+    const text = JSON.stringify(item.case, null, 1);
+    const code = el("pre", { class: "case-json", tabindex: "0", "aria-label": `Caso ${item.case.id}` }, text);
+    const copy = el("button", { type: "button", class: "ghost" }, "Copiar o caso");
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        copy.textContent = "Copiado";
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+        copy.textContent = "Texto selecionado: copie com Ctrl+C";
+      }
+    });
+    const draft = el("div", { class: "fb-case", hidden: true }, code,
+      el("div", { class: "fb-case-foot" }, copy,
+        el("span", { text: `Cole no evals/cases.json, escreva em must_include ou must_not_include o que a resposta certa precisa ter e rode python -m emporio eval --only ${item.case.id}` })));
+    const toggle = el("button", { type: "button", class: "ghost", "aria-expanded": "false" }, "Gerar caso de avaliação");
+    toggle.addEventListener("click", () => {
+      draft.hidden = !draft.hidden;
+      toggle.setAttribute("aria-expanded", String(!draft.hidden));
+      toggle.textContent = draft.hidden ? "Gerar caso de avaliação" : "Esconder o caso";
+    });
+    const line = (label, body) => el("div", { class: "fb-line" }, el("span", { class: "fb-label", text: label }), el("span", { text: body }));
+    list.append(el("li", { class: "feedback-item" },
+      line("Cliente", item.question),
+      line("Tom", shorten(item.answer, 320)),
+      item.comment ? line("Comentário", item.comment) : null,
+      el("div", { class: "fb-actions" },
+        el("span", { class: "fb-meta", text: `Marcada em ${formatDate(item.rated_at)}. ${item.tools.length ? `Ferramentas: ${item.tools.join(", ")}` : "Nenhuma ferramenta usada"}.` }),
+        el("a", { href: `/?session=${encodeURIComponent(item.session_id)}&turn=${item.turn}&tab=chat`, target: "_blank", rel: "noopener" }, "Abrir a conversa"),
+        toggle),
+      draft));
   }
 }
 

@@ -34,7 +34,8 @@ class FakeService:
         reply.emit("model_call", n=1, tools_enabled=True)
         reply.emit("guard", check="grounding", outcome="pass", details=[])
         reply.message_id = self.conversations.save_exchange(session_id, text, reply.text, [],
-                                                            {"trace": reply.trace, "latency_ms": 5})
+                                                            {"trace": reply.trace, "latency_ms": 5,
+                                                             "simulated_now": simulated_now})
         return reply
 
 
@@ -63,6 +64,7 @@ def test_team_screens_need_the_access_code_when_one_is_set(service):
     client = TestClient(create_app(service=service))
     assert client.get("/api/config").json()["team_auth"] is True
     team_calls = [("GET", "/api/handoffs"), ("POST", "/api/handoffs/EM-20261103-0001/resolve"), ("GET", "/api/metrics"),
+                  ("GET", "/api/feedback/cases"),
                   ("GET", "/api/knowledge"), ("GET", "/api/knowledge/manual"), ("DELETE", "/api/knowledge/1")]
     for method, path in team_calls:
         assert client.request(method, path).status_code == 401, path
@@ -96,6 +98,20 @@ def test_input_validation(client):
     assert client.post("/api/chat", json={"session_id": "bad id!", "message": "oi"}).status_code == 422
     assert client.post("/api/chat", json={"session_id": "s", "message": ""}).status_code == 422
     assert client.post("/api/chat", json={"session_id": "s", "message": "oi", "simulated_now": "ontem"}).status_code == 422
+
+
+def test_a_thumbs_down_with_a_comment_comes_back_as_a_draft_case(client):
+    client.post("/api/chat", json={"session_id": "web-7", "message": "Quanto custa o GD20?"})
+    answer = client.post("/api/chat", json={"session_id": "web-7", "message": "E em 10x?",
+                                            "simulated_now": "2026-11-03T10:30:00"}).json()
+    assert client.get("/api/feedback/cases").json() == {"cases": []}
+    client.post("/api/feedback", json={"message_id": answer["message_id"], "rating": "down"})
+    client.post("/api/feedback", json={"message_id": answer["message_id"], "rating": "down",
+                                       "comment": "o valor está errado"})  # the optional comment, sent after the 👎
+    [item] = client.get("/api/feedback/cases").json()["cases"]
+    assert item["turn"] == 2 and item["comment"] == "o valor está errado"
+    assert item["case"]["turns"] == ["Quanto custa o GD20?", "E em 10x?"]
+    assert item["case"]["now"] == "2026-11-03T10:30:00" and item["case"]["must_include"] == []
 
 
 def test_feedback_handoffs_and_metrics(client, service):
