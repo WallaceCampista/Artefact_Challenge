@@ -110,6 +110,19 @@ def serialize(reply: Reply) -> dict:
     }
 
 
+# The page and its script change together. Without this header the browser may keep an old app.js
+# next to a new index.html after an update, and the page breaks until a hard reload. "no-cache"
+# still caches, it only asks the server first (a 304 when nothing changed).
+REVALIDATE = {"Cache-Control": "no-cache"}
+
+
+class RevalidatedFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.update(REVALIDATE)
+        return response
+
+
 def create_app(settings: Settings | None = None, service: ChatService | None = None) -> FastAPI:
     if service is None:
         if settings is None:
@@ -119,7 +132,7 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
     app = FastAPI(title="Empório da Música — Tom", version="1.0",
                   description="Customer service agent API (see README).")
     app.state.service = service
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/static", RevalidatedFiles(directory=STATIC), name="static")
 
     def team_only(x_team_token: str = Header(default="")) -> None:
         """Team screens show customers' contacts and change what the agent reads."""
@@ -137,7 +150,7 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(STATIC / "index.html")
+        return FileResponse(STATIC / "index.html", headers=REVALIDATE)
 
     @app.get("/health")
     def health():

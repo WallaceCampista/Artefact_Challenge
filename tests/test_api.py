@@ -127,10 +127,14 @@ def test_feedback_handoffs_and_metrics(client, service):
 
 
 def test_index_and_config_are_served(client):
-    page = client.get("/").text
-    assert "/static/app.js" in page and "/static/styles.css" in page
+    page = client.get("/")
+    assert "/static/app.js" in page.text and "/static/styles.css" in page.text
+    assert page.headers["cache-control"] == "no-cache"  # an update never pairs a new page with an old script
     for asset in ("app.js", "styles.css"):
-        assert client.get(f"/static/{asset}").status_code == 200
+        response = client.get(f"/static/{asset}")
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-cache"
+        unchanged = client.get(f"/static/{asset}", headers={"If-None-Match": response.headers["etag"]})
+        assert unchanged.status_code == 304
     config = client.get("/api/config").json()
     assert config["model"] and any(c["value"] for c in config["clocks"])
 
