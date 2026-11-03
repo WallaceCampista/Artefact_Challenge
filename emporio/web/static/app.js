@@ -43,6 +43,7 @@ const GUARD_TITLES = {
   grounding: { pass: "Checagem de fatos aprovada", retry: "Checagem de fatos pediu uma reescrita", unresolved: "Checagem de fatos: valor sem fonte mesmo após a reescrita", withheld: "Preço sem fonte retido: o cliente recebeu um aviso no lugar" },
   protocol: { appended: "Protocolo acrescentado à resposta pelo código" },
   promise: { removed: "Promessa feita antes de verificar o pedido removida" },
+  language: { trimmed: "Trecho em outro idioma removido" },
   personal_data: { redacted: "Dados pessoais removidos da resposta" },
   system_prompt: { blocked: "Vazamento do prompt de sistema bloqueado" },
 };
@@ -329,7 +330,7 @@ function renderRoll(turn) {
     const track = el("div", { class: "lane", role: "list", "aria-label": label });
     for (const span of spans.filter((s) => s.lane === lane)) {
       if (lane === "check") {
-        const symbol = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", withheld: "✕", removed: "✕", appended: "+" }[span.outcome] || "•";
+        const symbol = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", withheld: "✕", removed: "✕", trimmed: "✕", appended: "+" }[span.outcome] || "•";
         const mark = el("button", { type: "button", class: `mark ${span.outcome}`, style: `left:clamp(11px, ${pct(span.start)}, calc(100% - 11px))`, "aria-label": span.label, role: "listitem", "data-tip": `${span.label}, em ${seconds(span.start)}` }, symbol);
         track.append(mark);
       } else {
@@ -374,13 +375,14 @@ function stepFor(event) {
       el("pre", { text: `argumentos: ${json(event.arguments)}\n\nresultado: ${json(event.result)}` }));
   } else if (event.type === "guard") {
     const good = ["pass", "appended"].includes(event.outcome);
-    icon = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", withheld: "✕", removed: "✕", appended: "+" }[event.outcome] || "•";
+    icon = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", withheld: "✕", removed: "✕", trimmed: "✕", appended: "+" }[event.outcome] || "•";
     tone = good ? "good" : event.outcome === "retry" || event.outcome === "unresolved" ? "warn" : "crit";
     title = guardTitle(event);
     const explain = {
       grounding: "Todo valor, percentual, prazo, número de parcelas e código de rastreio precisa vir do resultado de uma ferramenta ou da conversa.",
       protocol: "O modelo deixou de fora o número do chamado, então o código o acrescentou.",
       promise: "A resposta dizia que sim antes de o pedido ser verificado. Os prazos dependem do pedido, então o código tirou a promessa.",
+      language: "O modelo trocou de idioma no meio da resposta mesmo depois da reescrita; o código manteve só as frases em português.",
       personal_data: "A resposta tinha e-mail ou telefone de um cliente que esta pessoa não informou.",
       system_prompt: "A resposta repetia as instruções internas do agente, então foi trocada por uma recusa.",
     }[event.check] || "";

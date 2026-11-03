@@ -51,6 +51,15 @@ UNVERIFIED_YES = re.compile(
     r"(?:claro que (?:pode|sim)|sim,? (?:pode|claro)|pode sim|com certeza|sim(?=[!.]))[^,.!?\n]{0,25}?[,.!]\s*",
     re.IGNORECASE)
 ASKS_FOR_ORDER = re.compile(r"n[uú]mero do (?:seu )?pedido", re.IGNORECASE)
+CLOSING_QUESTION = "Posso lhe ajudar com algo mais?"
+# The answer waits for data from the customer ("preciso do número do seu pedido"), on accent-free text.
+WAITING_FOR_DATA = re.compile(r"\bpreciso (?:do|da|de|dos|das)\b|\bme (?:informe|passe|diga|envie)\b"
+                              r"|\bpode me (?:informar|passar|dizer|enviar)\b|\bnumero do (?:seu )?pedido\b")
+# Qwen sometimes switches to Chinese mid-sentence. Cyrillic, Arabic, Japanese, Chinese and Korean scripts.
+OTHER_SCRIPT = re.compile(r"[\u0400-\u04ff\u0600-\u06ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+# "Está dentro do prazo" and its variants, on accent-free lowercase text.
+WITHIN_DEADLINE = re.compile(r"\bdentro d(?:e todos |os? |as? )?(?:os |seus )?prazos?\b|\bainda (?:esta|da|cabe) (?:no |dentro do )?prazo"
+                             r"|\bainda (?:pode|e possivel) (?:devolver|trocar|desistir)")
 GROUNDING_RETRIES = 1
 PRICE_LOOKUPS = 3  # products looked up by code when an answer quotes a price without a source
 
@@ -261,6 +270,44 @@ def drop_unverified_yes(answer: str) -> tuple[str, str | None]:
     return greeting + rest[0].upper() + rest[1:], answer[len(greeting):match.end()].strip()
 
 
+def verdict_issues(answer: str, calls) -> list[str]:
+    """The answer says the order is within a deadline although consultar_pedido concluded that every store
+    deadline has ended. Seen live: with the conclusion in front of it, the model wrote the opposite."""
+    text = normalize(answer)
+    for call in calls:
+        conclusion = call.result.get("conclusao_prazos", "") if call.name == "consultar_pedido" else ""
+        if "TODOS os prazos da loja já terminaram" not in conclusion:
+            continue
+        for match in WITHIN_DEADLINE.finditer(text):
+            if not re.search(r"\bnao\b(?:\s+\w+){0,3}\s*$", text[:match.start()]):  # "não está dentro do prazo" is right
+                return [f'diz que o pedido está dentro do prazo, mas consultar_pedido concluiu: "{conclusion}"']
+    return []
+
+
+def tidy_closing(answer: str) -> str:
+    """Drops the closing question when the answer already ends by asking the customer something:
+    "Quer que eu encaminhe? Posso lhe ajudar com algo mais?" reads as two questions at once."""
+    stripped = answer.rstrip()
+    if not stripped.endswith(CLOSING_QUESTION):
+        return answer
+    before = stripped[: -len(CLOSING_QUESTION)].rstrip()
+    return before if before.endswith("?") or WAITING_FOR_DATA.search(normalize(before)) else answer
+
+
+def language_issues(answer: str) -> list[str]:
+    return ["tem trechos em outro idioma; escreva tudo em português do Brasil"] if OTHER_SCRIPT.search(answer) else []
+
+
+def cut_other_script(answer: str) -> str:
+    """Keeps the complete sentences before the first character in another script."""
+    match = OTHER_SCRIPT.search(answer)
+    if match is None:
+        return answer
+    head = answer[:match.start()]
+    end = max(head.rfind(mark) for mark in ".!?")
+    return head[:end + 1].strip() if end >= 0 else head.strip()
+
+
 def promotion_issues(answer: str, evidence: str) -> list[str]:
     """Policy 6.2: a promotional price must come with the original price and the discount."""
     issues = []
@@ -438,7 +485,7 @@ class Agent:
         for attempt in range(GROUNDING_RETRIES + 1):
             results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
             missing = ungrounded_facts(text, conversation_text + results)
-            issues = promotion_issues(text, results)
+            issues = promotion_issues(text, results) + verdict_issues(text, reply.tool_calls) + language_issues(text)
             # A price without a source is often right but unlooked-up: tool results are not replayed
             # between turns, so "12x of the bass we discussed" has no evidence this turn. Look the
             # product up first and check the same answer again; a rewrite once turned a correct
@@ -448,7 +495,7 @@ class Agent:
                     self._look_up_products(lookups, reply, [text, message, *recent]):
                 results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
                 missing = ungrounded_facts(text, conversation_text + results)
-                issues = promotion_issues(text, results)
+                issues = promotion_issues(text, results) + verdict_issues(text, reply.tool_calls) + language_issues(text)
             if not (missing or issues) or attempt == GROUNDING_RETRIES:
                 reply.ungrounded = missing
                 outcome = "unresolved" if (missing or issues) else "pass"
@@ -476,6 +523,10 @@ class Agent:
             text = self._loop(messages, reply)
 
         text = PLACEHOLDER.sub("", text).strip() or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
+        if OTHER_SCRIPT.search(text):  # still there after the rewrite: keep the Portuguese sentences before it
+            text = cut_other_script(text) or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
+            reply.emit("guard", check="language", outcome="trimmed", details=[])
+        text = tidy_closing(text)
         # The prompt says not to promise a return before checking the order; the model still opens with
         # "Claro que pode!" (stable across runs in the evals). Decided in code, like the protocol below.
         if "consultar_pedido" not in {c.name for c in reply.tool_calls}:

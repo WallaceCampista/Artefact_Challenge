@@ -76,7 +76,7 @@ def test_step_budget_forces_a_final_answer_without_tools(monkeypatch):
 
 # --------------------------------------------------------------------------- defences
 from emporio.agent import (UNVERIFIED_PRICE_MESSAGE, calls_from_text, catalog_search, drop_unverified_yes,
-                           ungrounded_facts)
+                           cut_other_script, tidy_closing, ungrounded_facts, verdict_issues)
 
 TOOLS = {"consultar_pedido", "detalhes_produto"}
 
@@ -283,6 +283,55 @@ def test_questions_about_what_the_store_has_are_searched_in_code(store):
     reply = Agent(load_settings(), client, SearchTools(store)).respond([], "Baixo da Cort, vocês têm?")
     assert [(c.name, c.arguments) for c in reply.tool_calls] == [("buscar_produtos", {"categoria": "Baixos", "termo": "cort"})]
     assert client.requests[0]["messages"][-1]["role"] == "tool"  # the model answers with the search in front of it
+
+
+ALL_ENDED = ("Hoje (03/11/2026) TODOS os prazos da loja já terminaram: não cabe arrependimento, troca nem garantia "
+             "legal. Resta só a garantia do fabricante (8.2), que a loja pode intermediar.")
+
+
+def test_an_answer_that_contradicts_the_deadline_verdict_is_rewritten():
+    order = ToolCall("consultar_pedido", {}, {"conclusao_prazos": ALL_ENDED}, 1.0)
+    # Live: the model wrote the opposite of the conclusion in front of it.
+    assert verdict_issues("Seu pedido está dentro de todos os prazos legais para arrependimento.", [order])
+    assert verdict_issues("Você ainda pode devolver o produto.", [order])
+    assert not verdict_issues("Infelizmente, você não está mais dentro do prazo de arrependimento.", [order])
+    assert not verdict_issues("Todos os prazos da loja já terminaram.", [order])
+    still_open = ToolCall("consultar_pedido", {}, {"conclusao_prazos": "Hoje ainda estão abertos: 4.2. Os demais já terminaram."}, 1.0)
+    assert not verdict_issues("A troca por defeito ainda está dentro do prazo.", [still_open])
+
+    class OrderTools(FakeTools):
+        schemas = [{"type": "function", "function": {"name": "consultar_pedido"}}]
+
+        def run(self, name, arguments):
+            return ToolCall(name, json.loads(arguments) if isinstance(arguments, str) else arguments,
+                            {"conclusao_prazos": ALL_ENDED}, 1.0)
+
+    client = FakeClient([tool_message("consultar_pedido", {"numero_pedido": 7, "email_ou_telefone": "a@b.com"}),
+                         text_message("Seu pedido está dentro de todos os prazos para arrependimento."),
+                         text_message("Todos os prazos da loja já terminaram; resta a garantia do fabricante.")])
+    reply = Agent(load_settings(), client, OrderTools()).respond([], "É o pedido 7, e-mail a@b.com")
+    assert reply.text.startswith("Todos os prazos") and reply.grounding_retries == 1
+    assert ALL_ENDED in client.requests[2]["messages"][-1]["content"]
+
+
+def test_the_closing_question_is_dropped_after_another_question():
+    assert tidy_closing("Quer que eu encaminhe para a equipe?\n\nPosso lhe ajudar com algo mais?") == \
+        "Quer que eu encaminhe para a equipe?"
+    assert tidy_closing("Pronto, está encaminhado. Posso lhe ajudar com algo mais?") == \
+        "Pronto, está encaminhado. Posso lhe ajudar com algo mais?"
+    # Waiting for the order number: offering more help reads as if the conversation were over.
+    assert tidy_closing("Preciso do número do seu pedido e do e-mail. Posso lhe ajudar com algo mais?") == \
+        "Preciso do número do seu pedido e do e-mail."
+
+
+def test_text_in_another_script_is_rewritten_and_trimmed_if_it_stays():
+    mixed = "Não posso verificar o clima. Tem algum tipo de violão ou outra乐器相关的问题我可以帮助您解答。"
+    assert cut_other_script(mixed) == "Não posso verificar o clima."
+    client, events = FakeClient([text_message(mixed), text_message(mixed)]), []
+    reply = Agent(load_settings(), client, FakeTools()).respond([], "E a previsão do tempo?", on_event=events.append)
+    assert reply.text == "Não posso verificar o clima." and reply.grounding_retries == 1
+    assert "outro idioma" in client.requests[1]["messages"][-1]["content"]
+    assert ("language", "trimmed") in [(e["check"], e["outcome"]) for e in events if e["type"] == "guard"]
 
 def test_verified_order_becomes_a_session_fact():
     from emporio.agent import session_facts
