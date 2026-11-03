@@ -44,6 +44,12 @@ INSTALLMENTS = re.compile(r"\b(\d{1,2})\s?x\b", re.IGNORECASE)
 PLACEHOLDER = re.compile(r"\s*\[(?:nome|nome do cliente|cliente|seu nome)\]", re.IGNORECASE)
 PROMO = re.compile(r"(\d+)% de desconto \([^)]*\): de (R\$ [\d.,]+) por (R\$ [\d.,]+)")
 DAYS = re.compile(r"\b(\d+)(?:\s*(?:a|e|-)\s*(\d+))?\s+dias\b")
+# An unconditional yes at the start of an answer ("Claro que pode!"), after an optional greeting.
+UNVERIFIED_YES = re.compile(
+    r"^(?P<greeting>\s*(?:ol[aá]|oi)\b[^!.\n]{0,25}?[!,.]\s*)?"
+    r"(?:claro que (?:pode|sim)|sim,? (?:pode|claro)|pode sim|com certeza|sim(?=[!.]))[^,.!?\n]{0,25}?[,.!]\s*",
+    re.IGNORECASE)
+ASKS_FOR_ORDER = re.compile(r"n[uú]mero do (?:seu )?pedido", re.IGNORECASE)
 GROUNDING_RETRIES = 1
 PRICE_LOOKUPS = 3  # products looked up by code when an answer quotes a price without a source
 
@@ -178,6 +184,19 @@ def _tool_hint(missing: list[str]) -> str:
     if any(m.startswith("BR") for m in missing):
         hints.append("rastreio: consultar_pedido")
     return "consulte " + "; ".join(hints)
+
+
+def drop_unverified_yes(answer: str) -> tuple[str, str | None]:
+    """Removes a yes given before the order is checked: "Claro que pode! Me passe o número do pedido…"
+    becomes "Me passe o número do pedido…". The answer asking for the order number is the sign that
+    nothing was verified yet; whether a return is possible depends on deadlines the tool computes.
+    Returns the answer and the removed words (None if nothing changed)."""
+    match = UNVERIFIED_YES.match(answer) if ASKS_FOR_ORDER.search(answer) else None
+    rest = answer[match.end():] if match else ""
+    if not rest:
+        return answer, None
+    greeting = match.group("greeting") or ""
+    return greeting + rest[0].upper() + rest[1:], answer[len(greeting):match.end()].strip()
 
 
 def promotion_issues(answer: str, evidence: str) -> list[str]:
@@ -386,6 +405,12 @@ class Agent:
             text = self._loop(messages, reply)
 
         text = PLACEHOLDER.sub("", text).strip() or "Desculpe, não consegui montar uma resposta agora. Pode reformular?"
+        # The prompt says not to promise a return before checking the order; the model still opens with
+        # "Claro que pode!" (stable across runs in the evals). Decided in code, like the protocol below.
+        if "consultar_pedido" not in {c.name for c in reply.tool_calls}:
+            text, promise = drop_unverified_yes(text)
+            if promise:
+                reply.emit("guard", check="promise", outcome="removed", details=[promise])
         # Critical information is guaranteed by code, not left to the model: the handoff protocol.
         for call in reply.tool_calls:
             protocol = call.result.get("protocolo") if call.name == "encaminhar_para_equipe" else None

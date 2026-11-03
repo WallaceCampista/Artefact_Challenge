@@ -165,7 +165,7 @@ main { flex: 1; min-height: 0; padding: 18px 24px 24px; }
 .mark { position: absolute; top: 2px; width: 22px; height: 22px; margin-left: -11px; border-radius: 50%; display: grid; place-items: center; background: var(--surface); border: 2px solid; font-size: 12px; font-weight: 700; padding: 0; }
 .mark.pass { color: var(--good); border-color: var(--good); }
 .mark.retry, .mark.unresolved { color: var(--warn); border-color: var(--warn); }
-.mark.redacted, .mark.blocked, .mark.withheld, .mark.appended { color: var(--crit); border-color: var(--crit); }
+.mark.redacted, .mark.blocked, .mark.withheld, .mark.removed, .mark.appended { color: var(--crit); border-color: var(--crit); }
 .mark.appended { color: var(--good); border-color: var(--good); }
 .roll-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
 .sw { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }

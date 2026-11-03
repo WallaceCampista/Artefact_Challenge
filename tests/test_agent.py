@@ -75,7 +75,7 @@ def test_step_budget_forces_a_final_answer_without_tools(monkeypatch):
 
 
 # --------------------------------------------------------------------------- defences
-from emporio.agent import UNVERIFIED_PRICE_MESSAGE, calls_from_text, ungrounded_facts
+from emporio.agent import UNVERIFIED_PRICE_MESSAGE, calls_from_text, drop_unverified_yes, ungrounded_facts
 
 TOOLS = {"consultar_pedido", "detalhes_produto"}
 
@@ -234,6 +234,22 @@ def test_a_wrong_price_of_a_real_product_is_rewritten_with_its_details(store):
     assert reply.text.endswith("R$ 358,25.") and reply.grounding_retries == 1 and reply.ungrounded == []
     retry = client.requests[1]["messages"]
     assert retry[-1]["role"] == "tool" and "358,25" in retry[-1]["content"]  # the lookup reached the rewrite
+
+
+def test_a_yes_before_the_order_is_checked_is_removed():
+    asks = "Para confirmar se está no prazo, preciso do número do seu pedido e do e-mail do cadastro."
+    assert drop_unverified_yes("Claro que pode! " + asks) == (asks, "Claro que pode!")
+    assert drop_unverified_yes("Olá, Letícia! Sim, pode sim. " + asks)[0] == "Olá, Letícia! " + asks
+    assert drop_unverified_yes("Claro que pode, me passe o número do pedido.")[0] == "Me passe o número do pedido."
+    assert drop_unverified_yes("Oi Letícia, claro que pode! " + asks)[0] == "Oi Letícia, " + asks
+    # Not asking for the order: nothing to verify, nothing removed.
+    assert drop_unverified_yes("Claro que pode passar na loja amanhã!") == ("Claro que pode passar na loja amanhã!", None)
+
+    client, events = FakeClient([text_message("Claro que pode! " + asks)]), []
+    reply = Agent(load_settings(), client, FakeTools()).respond(
+        [], "Me arrependi da minha compra, posso devolver?", on_event=events.append)
+    assert reply.text == asks
+    assert [(e["check"], e["outcome"]) for e in events if e["type"] == "guard"][-1] == ("promise", "removed")
 
 def test_verified_order_becomes_a_session_fact():
     from emporio.agent import session_facts

@@ -32,6 +32,7 @@ GUARD_NOTES = {
     ("grounding", "unresolved"): "grounding unresolved",
     ("grounding", "withheld"): "price without a source withheld",
     ("protocol", "appended"): "protocol added by code",
+    ("promise", "removed"): "unverified yes removed",
     ("personal_data", "redacted"): "personal data masked",
     ("system_prompt", "blocked"): "system prompt leak blocked",
 }
