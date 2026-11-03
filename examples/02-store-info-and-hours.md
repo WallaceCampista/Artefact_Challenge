@@ -6,17 +6,17 @@
 
 **Cliente:** Oi! Qual o endereço da loja?
 
-**Tom:** Olá! Nosso endereço é Rua 14 de Maio, 3200, Centro, Campo Grande/MS, CEP 79202-333. Como posso ajudar mais você hoje?
+**Tom:** Olá! Nosso endereço é Rua 14 de Maio, 3200, Centro, Campo Grande/MS, CEP 79202-333. Posso lhe ajudar com algo mais?
 
-<sub>No tool needed · 3.9 s</sub>
+<sub>No tool needed · 2.6 s</sub>
 
 ---
 
 **Cliente:** Posso passar aí amanhã de manhã para conhecer os ukuleles?
 
-**Tom:** A loja está fechada amanhã de manhã por ser um feriado. Ela reabre na terça-feira, dia 03/11, a partir das 09:00. Você pode nos visitar então para conhecer nossos ukuleles! Como posso ajudar mais você hoje?
+**Tom:** A loja está fechada amanhã de manhã por ser um feriado. Ela reabre na terça-feira, 03/11 às 09:00. Você pode nos visitar então para conhecer nossos ukuleles. Posso lhe ajudar com algo mais?
 
-<details><summary>Tools used: consultar_horario · 5.7 s</summary>
+<details><summary>Tools used: consultar_horario · 3.8 s</summary>
 
 `consultar_horario({"quando": "amanha"})`
 

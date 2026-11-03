@@ -6,23 +6,21 @@
 
 **Cliente:** Me arrependi da minha compra, posso devolver meu pedido?
 
-**Tom:** Claro que pode! Para confirmar se está dentro do prazo de arrependimento e entender os próximos passos, preciso do número do seu pedido e seu telefone ou e-mail de cadastro. Pode me fornecer essas informações, por favor?
+**Tom:** Para confirmar se você está dentro do prazo de arrependimento e as próximas etapas, preciso do número do seu pedido e do seu e-mail ou telefone de cadastro.
 
-<sub>No tool needed · 4.2 s</sub>
+<sub>No tool needed · 2.9 s</sub>
 
 ---
 
 **Cliente:** É o pedido 7, meu e-mail é leticia.rocha@jmail.com
 
-**Tom:** Olá Letícia,  
+**Tom:** Sinto informar que seu pedido foi entregue no dia 17/02/2026, e hoje já passou de todos os prazos da loja para arrependimento, troca ou garantia legal.  
   
-Seu pedido foi entregue no dia 17/02/2026, e hoje é 03/11/2026. Infelizmente, todos os prazos de arrependimento, troca por preferência e garantia legal já terminaram.  
+No entanto, ainda resta a garantia do fabricante, que varia entre 6 meses a 2 anos conforme o certificado do produto. A loja pode te auxiliar nessa questão se houver algum problema com o instrumento.  
   
-No entanto, a garantia do fabricante ainda está em vigor para o seu Shelby SU-21S Soprano Sunburst. A loja pode te auxiliar nessa questão se você precisar.  
-  
-Precisa de mais alguma coisa?
+Posso lhe ajudar com algo mais?
 
-<details><summary>Tools used: consultar_pedido · 13.5 s</summary>
+<details><summary>Tools used: consultar_pedido · 8.6 s</summary>
 
 `consultar_pedido({"numero_pedido": 7, "email_ou_telefone": "leticia.rocha@jmail.com"})`
 
@@ -36,30 +34,31 @@ Precisa de mais alguma coisa?
 
 **Cliente:** Poxa. E se o ukulele estiver com defeito, o que eu faço?
 
-**Tom:** Entendi, Letícia. Se o seu ukulele Shelby SU-21S Soprano Sunburst apresentar algum problema de qualidade dentro do prazo da garantia do fabricante, a loja pode te auxiliar nessa questão.  
+**Tom:** Se o ukulele estiver com defeito de fabricação, você pode solicitar uma troca em até 30 dias corridos após a compra. Após esse prazo, é necessário acionar a garantia diretamente com o fabricante. A loja pode intermediar este processo se solicitado.  
   
-Para isso, você precisaria entrar em contato com o suporte ao cliente do fabricante e informar sobre o defeito. A loja pode fornecer os detalhes necessários para essa comunicação.  
-  
-Gostaria que a gente pudesse ajudar mais?
+Posso lhe ajudar com algo mais?
 
-<sub>No tool needed · 8.4 s</sub>
+<details><summary>Tools used: consultar_politicas · 7.1 s</summary>
+
+`consultar_politicas({"pergunta": "Poxa. E se o ukulele estiver com defeito, o que eu faço?"})`
+
+```json
+{"trechos": [{"secao": "4.2 Trocas por Defeito", "texto": "- Produtos com defeito de fabricação podem ser trocados em até 30 (trinta) dias corridos após a compra.\n- Após os 30 dias, o cliente deve acionar a garantia diretamente com o fabricante. A Empório da Música pode intermediar o processo mediante solicitação.\n- Danos causados por mau uso, quedas, exposição a umidade excessiva ou modificações não autorizadas não são cobertos."}, {"secao": "1 Sobre a Empório da Música", "texto": "A Empório da Música é uma loja especializada em instrumentos musicais, fundada em 2008 em\nCampo Grande, Mato Grosso do Sul. Com mais de 15 anos de atuação no mercado, somos\nreferência regional na venda de instrumentos para músicos iniciantes, intermediários e profissionais.\nNosso catálogo abrange mais de 300 instrumentos de marcas nacionais e internacionais, incluindo\nguitarras, baixos, violões, …
+```
+
+</details>
 
 ---
 
 **Cliente:** Quero sim, por favor encaminhe para a garantia. Ele está com um zumbido nas cordas.
 
-**Tom:** Olá Letícia,  
+**Tom:** Sua solicitação foi encaminhada para a garantia do fabricante. O protocolo é EM-20261103-0001, e você deve receber uma resposta até 24 horas úteis.  
   
-Seu pedido foi encaminhado para a garantia do fabricante com o protocolo EM-20261103-0001. Você pode esperar um retorno até 24 horas úteis.  
-  
-Caso tenha mais dúvidas ou precise de assistência, estaremos à disposição!  
-  
-Até logo,  
-Equipe Empório da Música
+Se precisar de mais alguma coisa, estou à disposição!
 
-<details><summary>Tools used: encaminhar_para_equipe · 13.5 s</summary>
+<details><summary>Tools used: encaminhar_para_equipe · 10.0 s</summary>
 
-`encaminhar_para_equipe({"motivo": "devolucao_ou_troca", "resumo": "Letícia quer encaminhar o pedido 7 para garantia do fabricante, pois o ukulele Shelby SU-21S Soprano Sunburst está com um zumbido nas cordas.", "contato": "leticia.rocha@jmail.com"})`
+`encaminhar_para_equipe({"motivo": "devolucao_ou_troca", "resumo": "Ukulele Shelby SU-21S Soprano Sunburst apresenta zumbido nas cordas, solicitando encaminhamento para garantia.", "contato": "leticia.rocha@jmail.com"})`
 
 ```json
 {"protocolo": "EM-20261103-0001", "prazo_de_retorno": "até 24 horas úteis (regra 7.3)", "observacao": "Informe o protocolo e o prazo ao cliente."}
