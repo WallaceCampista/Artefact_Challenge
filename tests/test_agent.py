@@ -75,7 +75,7 @@ def test_step_budget_forces_a_final_answer_without_tools(monkeypatch):
 
 
 # --------------------------------------------------------------------------- defences
-from emporio.agent import calls_from_text, ungrounded_facts
+from emporio.agent import UNVERIFIED_PRICE_MESSAGE, calls_from_text, ungrounded_facts
 
 TOOLS = {"consultar_pedido", "detalhes_produto"}
 
@@ -186,6 +186,54 @@ def test_payment_follow_up_looks_the_product_up_again(store):
         ("detalhes_produto", {"produto": "Takamine GD20 Dreadnought Natural"})]
     assert reply.ungrounded == []
 
+
+
+class CatalogTools(FakeTools):
+    """Fake tools over the real catalog: detalhes_produto answers with the payment line."""
+
+    def __init__(self, store, installment="até 12x de R$ 358,25 sem juros"):
+        self.store, self.installment = store, installment
+
+    def run(self, name, arguments):
+        args = arguments if isinstance(arguments, dict) else json.loads(arguments)
+        return ToolCall(name, args, {"nome": args["produto"], "pagamento": {"cartao_de_credito": self.installment}}, 1.0)
+
+
+def test_a_price_without_a_source_is_looked_up_before_any_rewrite(store):
+    # Live case: 12x of a product discussed turns earlier. The value was right but had no source this turn,
+    # and the rewrite turned R$ 358,25 into a wrong R$ 358,33. Now code looks the product up and re-checks.
+    history = [{"role": "user", "content": "Se eu parcelar em 12 vezes, quanto fica?"},
+               {"role": "assistant", "content": "Você quer parcelar o Yamaha Bass 3X em 12 vezes?"}]
+    draft = "Em 12x sem juros, o Yamaha Bass 3X fica R$ 358,25 por parcela."
+    client, events = FakeClient([text_message(draft)]), []
+    reply = Agent(load_settings(), client, CatalogTools(store)).respond(
+        history, "Sim, foi exatamente o que eu pedi", on_event=events.append)
+    assert reply.text == draft and len(client.requests) == 1 and reply.grounding_retries == 0
+    assert [(c.name, c.arguments) for c in reply.tool_calls] == [
+        ("detalhes_produto", {"produto": "Yamaha Bass 3X Electric Bass"})]
+    assert [e["reason"] for e in events if e["type"] == "tool"] == ["grounding: price without a source"]
+    assert [e["outcome"] for e in events if e["type"] == "guard"] == ["pass"]
+
+
+def test_a_price_still_without_a_source_after_the_rewrite_is_never_sent(store):
+    # Live case: the store sells no Cort basses; the model listed invented ones, and the rewrite invented
+    # other prices. Nothing in the catalog matches, so the customer gets a safe answer instead.
+    client, events = FakeClient([text_message("Temos o Cort S-250HF por R$ 4.299,00."),
+                                 text_message("O Cort S-250HF sai por R$ 3.799,00.")]), []
+    reply = Agent(load_settings(), client, CatalogTools(store)).respond(
+        [], "Não tenho orçamento, me lista os baixos da Cort", on_event=events.append)
+    assert reply.text == UNVERIFIED_PRICE_MESSAGE and reply.ungrounded == ["R$ 3799,00"] and not reply.tool_calls
+    assert [e["outcome"] for e in events if e["type"] == "guard"] == ["retry", "withheld"]
+    assert "não peça desculpas" in client.requests[1]["messages"][-1]["content"]
+
+
+def test_a_wrong_price_of_a_real_product_is_rewritten_with_its_details(store):
+    client = FakeClient([text_message("Em 12x, o Yamaha Bass 3X fica R$ 358,33."),
+                         text_message("Em 12x, o Yamaha Bass 3X fica R$ 358,25.")])
+    reply = Agent(load_settings(), client, CatalogTools(store)).respond([], "E em 12x?")
+    assert reply.text.endswith("R$ 358,25.") and reply.grounding_retries == 1 and reply.ungrounded == []
+    retry = client.requests[1]["messages"]
+    assert retry[-1]["role"] == "tool" and "358,25" in retry[-1]["content"]  # the lookup reached the rewrite
 
 def test_verified_order_becomes_a_session_fact():
     from emporio.agent import session_facts

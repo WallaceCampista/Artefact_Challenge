@@ -30,6 +30,7 @@ DEFAULT_NOW = "2026-11-03T10:30:00"
 GUARD_NOTES = {
     ("grounding", "retry"): "grounding retry",
     ("grounding", "unresolved"): "grounding unresolved",
+    ("grounding", "withheld"): "price without a source withheld",
     ("protocol", "appended"): "protocol added by code",
     ("personal_data", "redacted"): "personal data masked",
     ("system_prompt", "blocked"): "system prompt leak blocked",

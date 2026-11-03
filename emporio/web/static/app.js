@@ -40,7 +40,7 @@ const PRESENCE = {
 };
 // The interface is in Portuguese, like the customers and the store team who use it.
 const GUARD_TITLES = {
-  grounding: { pass: "Checagem de fatos aprovada", retry: "Checagem de fatos pediu uma reescrita", unresolved: "Checagem de fatos: valor sem fonte mesmo após a reescrita" },
+  grounding: { pass: "Checagem de fatos aprovada", retry: "Checagem de fatos pediu uma reescrita", unresolved: "Checagem de fatos: valor sem fonte mesmo após a reescrita", withheld: "Preço sem fonte retido: o cliente recebeu um aviso no lugar" },
   protocol: { appended: "Protocolo acrescentado à resposta pelo código" },
   personal_data: { redacted: "Dados pessoais removidos da resposta" },
   system_prompt: { blocked: "Vazamento do prompt de sistema bloqueado" },
@@ -57,6 +57,7 @@ const PREROUTE_REASONS = {
   "pre-routing: opening hours on a given day": "Pré-roteamento: pergunta sobre o horário da loja em um dia específico",
   "pre-routing: payment question about the product in focus": "Pré-roteamento: pergunta de pagamento sobre o produto em foco",
   "grounding: deadline or percentage without a source": "Checagem de fatos: prazo ou percentual sem fonte, então o manual foi consultado",
+  "grounding: price without a source": "Checagem de fatos: preço sem fonte, então o código consultou o produto citado",
   "pre-routing: question about a team document": "Pré-roteamento: a pergunta trata de um documento da base de conhecimento",
 };
 
@@ -326,7 +327,7 @@ function renderRoll(turn) {
     const track = el("div", { class: "lane", role: "list", "aria-label": label });
     for (const span of spans.filter((s) => s.lane === lane)) {
       if (lane === "check") {
-        const symbol = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", appended: "+" }[span.outcome] || "•";
+        const symbol = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", withheld: "✕", appended: "+" }[span.outcome] || "•";
         const mark = el("button", { type: "button", class: `mark ${span.outcome}`, style: `left:clamp(11px, ${pct(span.start)}, calc(100% - 11px))`, "aria-label": span.label, role: "listitem", "data-tip": `${span.label}, em ${seconds(span.start)}` }, symbol);
         track.append(mark);
       } else {
@@ -371,7 +372,7 @@ function stepFor(event) {
       el("pre", { text: `argumentos: ${json(event.arguments)}\n\nresultado: ${json(event.result)}` }));
   } else if (event.type === "guard") {
     const good = ["pass", "appended"].includes(event.outcome);
-    icon = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", appended: "+" }[event.outcome] || "•";
+    icon = { pass: "✓", retry: "↻", unresolved: "!", redacted: "✕", blocked: "✕", withheld: "✕", appended: "+" }[event.outcome] || "•";
     tone = good ? "good" : event.outcome === "retry" || event.outcome === "unresolved" ? "warn" : "crit";
     title = guardTitle(event);
     const explain = {

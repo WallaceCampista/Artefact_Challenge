@@ -8,7 +8,9 @@ on any OpenAI-compatible server. Per user message:
       -> tools run in Python, results go back as "tool" messages
       -> repeat, at most `max_tool_steps` times, then force a text answer
       -> grounding check: every price / tracking code in the answer must come from a tool
-         result or from the conversation; otherwise the model is told so and answers again, once
+         result or from the conversation; otherwise code looks up the products the answer names,
+         and only if the answer is still unsupported is the model told so and answers again, once.
+         A price still without a source after that is not sent: the customer gets a safe answer
       -> privacy guard on the final text (personal data of other customers, system prompt)
 
 Every step is also emitted as a trace event (`on_event`), which the web UI streams live and
@@ -43,10 +45,18 @@ PLACEHOLDER = re.compile(r"\s*\[(?:nome|nome do cliente|cliente|seu nome)\]", re
 PROMO = re.compile(r"(\d+)% de desconto \([^)]*\): de (R\$ [\d.,]+) por (R\$ [\d.,]+)")
 DAYS = re.compile(r"\b(\d+)(?:\s*(?:a|e|-)\s*(\d+))?\s+dias\b")
 GROUNDING_RETRIES = 1
+PRICE_LOOKUPS = 3  # products looked up by code when an answer quotes a price without a source
 
 FALLBACK_MESSAGE = (
     "Desculpe, estou com uma instabilidade no sistema agora. Tente de novo em instantes ou fale "
     "com a nossa equipe pelo (67) 3341-4444."
+)
+# Sent instead of an answer whose price or installment count has no source even after the rewrite.
+# Tested live: asked to fix invented prices without a lookup, the model invented other prices.
+UNVERIFIED_PRICE_MESSAGE = (
+    "Não consegui confirmar esse valor no nosso sistema e prefiro não te passar uma informação errada. "
+    "Pode me dizer a marca e o modelo do produto, ou reformular a pergunta, para eu consultar de novo? "
+    "Se preferir, encaminho sua dúvida para a nossa equipe."
 )
 
 
@@ -150,6 +160,11 @@ def hours_question(message: str) -> str | None:
         if re.search(rf"\b{word}\b", text):
             return "hoje" if word == "agora" else word
     return None
+
+
+def _is_price(fact: str) -> bool:
+    """A money amount ("R$ 358,25") or an installment count ("12x") from ungrounded_facts."""
+    return fact.startswith("R$") or fact.endswith("x")
 
 
 def _tool_hint(missing: list[str]) -> str:
@@ -269,6 +284,22 @@ class Agent:
                 return found[0] if len(found) == 1 else None
         return None
 
+    def _look_up_products(self, messages: list[dict], reply: Reply, texts: list[str]) -> bool:
+        """Runs detalhes_produto for the catalog products named in the first of `texts` that names
+        any (the draft answer, then the message, then recent turns). True if something was looked up."""
+        store = getattr(self.tools, "store", None)
+        if store is None or "detalhes_produto" not in self.tool_names:
+            return False
+        known = {c.result.get("nome") for c in reply.tool_calls if c.name == "detalhes_produto"}
+        for text in texts:
+            products = [p for p in store.products_mentioned(text) if p.name not in known][:PRICE_LOOKUPS]
+            if products:
+                for product in products:
+                    self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name},
+                                   reason="grounding: price without a source")
+                return True
+        return False
+
     def respond(self, history: list[dict], message: str, session_id: str | None = None,
                 facts: list[str] | None = None, on_event: Callable[[dict], None] | None = None) -> Reply:
         """Answers one user message. `history` holds previous {"role", "content"} text turns;
@@ -313,14 +344,28 @@ class Agent:
                            reason="pre-routing: question about a team document")
 
         text = self._loop(messages, reply)
+        recent = [m["content"] for m in reversed(history)][:4]
         for attempt in range(GROUNDING_RETRIES + 1):
             results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
             missing = ungrounded_facts(text, conversation_text + results)
             issues = promotion_issues(text, results)
+            # A price without a source is often right but unlooked-up: tool results are not replayed
+            # between turns, so "12x of the bass we discussed" has no evidence this turn. Look the
+            # product up first and check the same answer again; a rewrite once turned a correct
+            # R$ 358,25 into a wrong R$ 358,33.
+            lookups: list[dict] = []
+            if attempt < GROUNDING_RETRIES and any(_is_price(m) for m in missing) and \
+                    self._look_up_products(lookups, reply, [text, message, *recent]):
+                results = " ".join(json.dumps(c.result, ensure_ascii=False) for c in reply.tool_calls)
+                missing = ungrounded_facts(text, conversation_text + results)
+                issues = promotion_issues(text, results)
             if not (missing or issues) or attempt == GROUNDING_RETRIES:
                 reply.ungrounded = missing
-                reply.emit("guard", check="grounding", outcome="unresolved" if (missing or issues) else "pass",
-                           details=missing + issues)
+                outcome = "unresolved" if (missing or issues) else "pass"
+                if any(_is_price(m) for m in missing):
+                    # Decided in code: a price nobody can source never reaches the customer.
+                    text, outcome = UNVERIFIED_PRICE_MESSAGE, "withheld"
+                reply.emit("guard", check="grounding", outcome=outcome, details=missing + issues)
                 break
             reply.grounding_retries += 1
             reply.emit("guard", check="grounding", outcome="retry", details=missing + issues)
@@ -329,7 +374,9 @@ class Agent:
             messages += [
                 {"role": "assistant", "content": text},
                 {"role": "system", "content": "Verificação automática da resposta acima: " + "; ".join(problems)
-                 + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas."},
+                 + ". Reescreva a resposta para o cliente corrigindo isso e usando só dados das ferramentas. "
+                   "O cliente não viu a resposta acima: não peça desculpas por ela."},
+                *lookups,
             ]
             # Invented deadlines/percentages almost always mean the manual was not read: read it for the model.
             used = {c.name for c in reply.tool_calls}

@@ -84,6 +84,22 @@ def mentioned_brands(text: str) -> set[str]:
     return {b for b in KNOWN_BRANDS if f" {normalize(b)} " in norm}
 
 
+def _mention_keys(product: Product) -> set[str]:
+    """How an answer names a product: the start of its name up to the model number
+    ("yamaha c40", "music man bass 1x"), also from the brand on ("korg synth 1" for
+    "Teclado Sintetizador Korg Synth 1"). Names without a number keep two words ("tagima dallas")."""
+    words = normalize(product.name).split()
+    starts = {0}
+    if product.brand and normalize(product.brand).split()[0] in words:
+        starts.add(words.index(normalize(product.brand).split()[0]))
+    keys = set()
+    for start in starts:
+        rest = words[start:]
+        end = next((i + 1 for i, word in enumerate(rest) if any(ch.isdigit() for ch in word)), min(2, len(rest)))
+        keys.add(" ".join(rest[:end]))
+    return keys
+
+
 @dataclass
 class Category:
     id: int
@@ -399,6 +415,13 @@ class Store:
             return []
         tied = [s[3] for s in scored if s[0] == best_coverage]
         return tied[:6]
+
+    def products_mentioned(self, text: str) -> list[Product]:
+        """Catalog products named in free text, such as an answer or a message, by brand and model:
+        "o Yamaha C40 custa…" -> [Yamaha C40 Nylon Natural]. A model name that is not in the
+        catalog ("Cort S-250HF") matches nothing."""
+        padded = f" {normalize(text)} "
+        return [p for p in self.products.values() if any(f" {key} " in padded for key in _mention_keys(p))]
 
     def similar_products(self, product: Product, limit: int = 3) -> list[Product]:
         """Available alternatives in the same category, closest in price (policy 7.3)."""
