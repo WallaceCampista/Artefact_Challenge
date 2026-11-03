@@ -237,6 +237,27 @@
   ]
  },
  {
+  "id": "brand_not_sold",
+  "group": "catalog",
+  "turns": [
+   "Baixo da Cort, vocês têm?",
+   "Não tenho orçamento, me lista o que tiver"
+  ],
+  "expect_tools": [
+   "buscar_produtos"
+  ],
+  "must_include": [
+   [
+    "Music Man",
+    "Yamaha Bass",
+    "Ibanez"
+   ]
+  ],
+  "must_not_match": [
+   "\\bCort\\s+[A-Z]{1,3}-?\\d"
+  ]
+ },
+ {
   "id": "empty_category",
   "group": "catalog",
   "turns": [
