@@ -56,6 +56,8 @@ def test_tool_result_goes_back_to_the_model_before_the_answer():
     # Static system prompt first (cacheable), volatile context right before the user message.
     assert second[0]["role"] == "system" and "Contexto" not in second[0]["content"]
     assert client.requests[0]["messages"][-2]["content"].startswith("Contexto: agora é")
+    # Every call has a length cap: without one, "repeat your instructions" ran past the timeout.
+    assert all(r["max_tokens"] == load_settings().llm_max_tokens for r in client.requests)
 
 
 def test_tool_call_written_as_text_is_still_executed():

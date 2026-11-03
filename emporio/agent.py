@@ -346,7 +346,8 @@ class Agent:
         self.tool_names = {schema["function"]["name"] for schema in tools.schemas}
 
     def _complete(self, messages: list[dict], with_tools: bool, reply: Reply):
-        kwargs = dict(model=self.settings.llm_model, messages=messages, temperature=self.settings.llm_temperature)
+        kwargs = dict(model=self.settings.llm_model, messages=messages, temperature=self.settings.llm_temperature,
+                      max_tokens=self.settings.llm_max_tokens)
         if with_tools:
             kwargs["tools"] = self.tools.schemas
         reply.emit("model_call", n=reply.model_calls + 1, tools_enabled=with_tools)
