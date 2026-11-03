@@ -57,6 +57,7 @@ const PREROUTE_REASONS = {
   "pre-routing: opening hours on a given day": "Pré-roteamento: pergunta sobre o horário da loja em um dia específico",
   "pre-routing: payment question about the product in focus": "Pré-roteamento: pergunta de pagamento sobre o produto em foco",
   "grounding: deadline or percentage without a source": "Checagem de fatos: prazo ou percentual sem fonte, então o manual foi consultado",
+  "pre-routing: question about a team document": "Pré-roteamento: a pergunta trata de um documento da base de conhecimento",
 };
 
 const state = {
@@ -548,15 +549,283 @@ async function loadMetrics() {
   }
 }
 
+/* ---------------- knowledge base ---------------- */
+const KB = { selected: "manual", file: null, info: null, confirmTimer: null };
+const KB_LIMIT = 2_000_000;
+const KB_KINDS = { markdown: "Markdown", text: "Texto", pdf: "PDF" };
+const KB_SPLIT = {
+  markdown: "Pelos títulos do Markdown",
+  numbered: "Pela numeração das seções, como no manual",
+  paragraphs: "Por parágrafos, até cerca de 1.200 caracteres cada",
+};
+const KB_WARNINGS = { instruction: "Texto dirigido ao assistente", personal_data: "Dados pessoais" };
+const ms = (n) => (n < 1000 ? `${number(n)} ms` : seconds(n));
+const ordinal = (n) => `${n}º`;
+const kib = (bytes) => (bytes < 1024 * 1024 ? `${number(Math.max(1, Math.round(bytes / 1024)))} KB` : `${(bytes / 1048576).toFixed(1).replace(".", ",")} MB`);
+
+function docStatus(doc) {
+  if (doc.active) return { cls: "active", text: "Ativo" };
+  return doc.warnings.length ? { cls: "review", text: "Em revisão" } : { cls: "", text: "Desativado" };
+}
+
+function indexLine(index) {
+  const mode = index.mode === "BM25" ? "Busca só por BM25." : "Busca híbrida (BM25 + embeddings).";
+  return `${number(index.sections)} trechos no índice: ${number(index.manual)} do manual e ${number(index.team)} da equipe. ${mode}`;
+}
+
+async function loadKnowledge() {
+  try {
+    KB.info = await api("/api/knowledge");
+  } catch (error) {
+    $("#kb-index").textContent = `Não foi possível carregar a base: ${error.message}`;
+    return;
+  }
+  const { index, manual, documents } = KB.info;
+  $("#kb-index").textContent = indexLine(index);
+  $("#kb-search-note").textContent = `Escreva uma pergunta de cliente e veja os trechos que a busca encontra. O Tom recebe os ${KB.info.agent_sections} primeiros.`;
+  if (KB.selected !== "manual" && !documents.some((d) => d.id === KB.selected)) KB.selected = "manual";
+  const item = (id, title, pill, sub) => el("li", {},
+    el("button", { type: "button", class: "doc", "aria-current": String(KB.selected === id), onclick: () => openDocument(id) },
+      el("div", { class: "doc-top" }, el("span", { class: "doc-title", text: title }), el("span", { class: `pill ${pill.cls}`, text: pill.text })),
+      el("span", { class: "doc-sub", text: sub })));
+  $("#kb-docs").replaceChildren(
+    item("manual", manual.title, { cls: "base", text: "Base do desafio" }, `${manual.filename}, ${manual.sections} trechos`),
+    ...documents.map((d) => item(d.id, d.title, docStatus(d),
+      `${d.filename || "texto colado"}, ${d.sections} ${plural(d.sections, "trecho", "trechos")}, ${formatDate(d.created_at)}`)),
+  );
+  openDocument(KB.selected, false);
+}
+
+async function openDocument(id, highlight = true) {
+  KB.selected = id;
+  if (highlight) for (const button of document.querySelectorAll("#kb-docs .doc")) button.setAttribute("aria-current", "false");
+  const detail = $("#kb-detail");
+  let doc, sections;
+  try {
+    if (id === "manual") {
+      ({ sections } = await api("/api/knowledge/manual"));
+      doc = { ...KB.info.manual, manual: true };
+    } else {
+      doc = await api(`/api/knowledge/${id}`);
+      sections = doc.section_list;
+    }
+  } catch (error) {
+    detail.replaceChildren(el("p", { class: "empty", text: `Não foi possível abrir o documento: ${error.message}` }));
+    return;
+  }
+  const index = [...document.querySelectorAll("#kb-docs .doc")];
+  const position = id === "manual" ? 0 : 1 + (KB.info?.documents || []).findIndex((d) => d.id === id);
+  index.forEach((button, i) => button.setAttribute("aria-current", String(i === position)));
+
+  const pill = doc.manual ? { cls: "base", text: "Base do desafio" } : docStatus(doc);
+  const meta = doc.manual
+    ? `PDF, ${sections.length} trechos, um por seção numerada`
+    : `${KB_KINDS[doc.kind] || doc.kind}, ${doc.sections} ${plural(doc.sections, "trecho", "trechos")}, ${number(doc.chars)} caracteres, adicionado em ${formatDate(doc.created_at)}`;
+  const parts = [
+    el("div", { class: "detail-head" }, el("h3", { text: doc.title }), el("span", { class: `pill ${pill.cls}`, text: pill.text })),
+    el("p", { class: "detail-meta", text: doc.manual ? `${doc.filename}. ${meta}.` : `${doc.filename ? `${doc.filename}. ` : ""}${meta}.` }),
+  ];
+  if (doc.manual) {
+    parts.push(el("div", { class: "notice info" }, el("p", { text: "Base fixa do desafio, sempre ativa. As avaliações usam só este manual, então documentos da equipe não mudam os números do relatório." })));
+  } else {
+    if (doc.warnings.length) {
+      parts.push(el("div", { class: "notice warn", role: "note" },
+        el("p", {}, el("b", { text: "A revisão encontrou pontos para checar. " }),
+          "O Tom recebe estes trechos como regras da loja, então o documento foi salvo desativado. Ative só se o conteúdo for legítimo."),
+        el("ul", {}, ...doc.warnings.map((w) => el("li", {}, el("b", { text: `${KB_WARNINGS[w.kind] || w.kind}` }),
+          ` em “${w.section}”: ${w.kind === "instruction" ? `“${w.excerpt}”` : w.excerpt}`)))));
+    }
+    parts.push(el("div", { class: "actions" },
+      el("button", { type: "button", class: "ghost", onclick: () => setDocumentActive(doc.id, !doc.active) },
+        doc.active ? "Desativar" : doc.warnings.length ? "Ativar mesmo assim" : "Ativar"),
+      el("button", { type: "button", class: "danger", onclick: (event) => removeDocument(doc.id, event.currentTarget) }, "Remover")));
+  }
+  parts.push(el("ol", { class: "kb-sections", "aria-label": "Trechos" }, ...sections.map((section, i) =>
+    el("li", {}, el("details", { open: i === 0 },
+      el("summary", {}, el("b", { text: section.label }), section.parent ? el("span", { text: section.parent }) : null),
+      el("pre", { text: section.body }))))));
+  detail.replaceChildren(...parts);
+}
+
+async function setDocumentActive(id, active) {
+  try {
+    await api(`/api/knowledge/${id}`, { method: "PATCH", body: JSON.stringify({ active }) });
+  } catch (error) { console.warn(error); }
+  await loadKnowledge();
+}
+
+async function removeDocument(id, button) {
+  // Two clicks instead of a browser confirm dialog: the first arms the button for a few seconds.
+  if (!button.classList.contains("confirm")) {
+    button.classList.add("confirm");
+    button.textContent = "Clique de novo para remover";
+    clearTimeout(KB.confirmTimer);
+    KB.confirmTimer = setTimeout(() => { button.classList.remove("confirm"); button.textContent = "Remover"; }, 4000);
+    return;
+  }
+  clearTimeout(KB.confirmTimer);
+  try {
+    await api(`/api/knowledge/${id}`, { method: "DELETE" });
+  } catch (error) { console.warn(error); }
+  $("#kb-steps").hidden = true;  // the last ingestion report may describe the removed document
+  KB.selected = "manual";
+  await loadKnowledge();
+}
+
+function chooseFile(file) {
+  const error = $("#kb-error");
+  error.hidden = true;
+  if (file && !/\.(md|markdown|txt|pdf)$/i.test(file.name)) {
+    showKbError("Formato não suportado. Envie Markdown (.md), texto (.txt) ou PDF.");
+    file = null;
+  } else if (file && file.size > KB_LIMIT) {
+    showKbError(`O arquivo tem ${kib(file.size)}; o limite é 2 MB.`);
+    file = null;
+  }
+  KB.file = file || null;
+  $("#kb-drop").classList.toggle("chosen", Boolean(KB.file));
+  $("#kb-file-label").textContent = KB.file ? KB.file.name : "Arraste um arquivo para cá ou clique para escolher";
+  $("#kb-file-note").textContent = KB.file ? `${kib(KB.file.size)}. Clique para trocar.` : "";
+}
+
+function showKbError(message) {
+  const error = $("#kb-error");
+  error.textContent = message;
+  error.hidden = false;
+}
+
+function toBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function ingestionSteps(result) {
+  const step = (time, icon, tone, title, detail) => el("li", { class: "step" },
+    el("div", { class: "step-time", text: time }),
+    el("div", { class: `step-icon ${tone}`, "aria-hidden": "true", text: icon }),
+    el("div", {}, el("div", { class: "step-title", text: title }), el("div", { class: "step-detail", text: detail })));
+  const { read, split, review, index, document: doc } = result;
+  const pages = read.pages ? `, ${read.pages} ${plural(read.pages, "página", "páginas")}` : "";
+  const rows = [
+    step(ms(read.ms), "i", "", doc.filename ? "Arquivo lido" : "Texto recebido", `${KB_KINDS[read.kind]}${pages}, ${number(read.chars)} caracteres.`),
+    step(ms(split.ms), "§", "tool", `Dividido em ${split.sections} ${plural(split.sections, "trecho", "trechos")}`, `${KB_SPLIT[split.method]}.`),
+    review.warnings.length
+      ? step("", "!", "warn", `Revisão: ${review.warnings.length} ${plural(review.warnings.length, "alerta", "alertas")}`, "Salvo desativado. Leia os alertas ao lado e ative o documento se o conteúdo for legítimo.")
+      : step("", "✓", "good", "Revisão sem alertas", "Nenhum texto dirigido ao assistente e nenhum dado pessoal."),
+  ];
+  if (index) {
+    if (index.error) rows.push(step(ms(index.ms), "!", "warn", "Embeddings indisponíveis", "O servidor de embeddings não respondeu; a busca usa só BM25 até ele voltar."));
+    else if (index.mode !== "BM25") rows.push(step(ms(index.ms), "E", "model", "Embeddings calculados", `${index.embedded} ${plural(index.embedded, "trecho novo", "trechos novos")}; ${index.cached} reaproveitados do cache.`));
+    rows.push(step("", "✓", "good", "Pronto para o Tom", indexLine(index)));
+  }
+  return rows;
+}
+
+async function ingest(event) {
+  event.preventDefault();
+  const text = $("#kb-text").value;
+  $("#kb-error").hidden = true;
+  if (!KB.file && !text.trim()) {
+    showKbError("Escolha um arquivo ou cole um texto.");
+    return;
+  }
+  const submit = $("#kb-submit");
+  submit.disabled = true;
+  submit.textContent = "Indexando…";
+  const steps = $("#kb-steps");
+  steps.hidden = true;
+  try {
+    const body = { title: $("#kb-title").value.trim() };
+    if (KB.file) Object.assign(body, { filename: KB.file.name, data_base64: toBase64(await KB.file.arrayBuffer()) });
+    else body.text = text;
+    const result = await api("/api/knowledge", { method: "POST", body: JSON.stringify(body) });
+    steps.replaceChildren(...ingestionSteps(result));
+    steps.hidden = false;
+    steps.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    chooseFile(null);
+    $("#kb-file").value = "";
+    $("#kb-text").value = "";
+    $("#kb-title").value = "";
+    $("#kb-paste").open = false;
+    KB.selected = result.document.id;
+    await loadKnowledge();
+  } catch (error) {
+    showKbError(error.message);
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "Indexar documento";
+  }
+}
+
+async function searchKnowledge(event) {
+  event?.preventDefault();
+  const query = $("#kb-query").value.trim();
+  const list = $("#kb-hits");
+  if (!query) { list.replaceChildren(); return; }
+  let result;
+  try {
+    result = await api("/api/knowledge/search", { method: "POST", body: JSON.stringify({ query, k: 5 }) });
+  } catch (error) {
+    list.replaceChildren(el("li", { class: "empty", text: `Não foi possível buscar: ${error.message}` }));
+    return;
+  }
+  const hybrid = result.mode !== "BM25";
+  const rows = [];
+  result.hits.forEach((hit, i) => {
+    if (i === result.agent_sections) rows.push(el("li", { class: "cutoff", text: `O Tom recebe só os ${result.agent_sections} trechos acima` }));
+    const body = el("p", { class: "hit-body", text: hit.body });
+    const scores = [
+      hit.bm25_rank ? el("span", { class: "chip", text: `BM25: ${ordinal(hit.bm25_rank)}` }) : el("span", { class: "chip none", text: "BM25: nenhuma palavra em comum" }),
+      hybrid && hit.vector_rank ? el("span", { class: "chip", text: `Embeddings: ${ordinal(hit.vector_rank)}, similaridade ${hit.similarity.toFixed(2).replace(".", ",")}` }) : null,
+      el("span", { class: "chip", text: `Fusão (RRF): ${hit.score.toFixed(4).replace(".", ",")}` }),
+    ];
+    rows.push(el("li", { class: `hit${i >= result.agent_sections ? " outside" : ""}` },
+      el("span", { class: "hit-rank", text: String(i + 1) }),
+      el("div", { class: "hit-head" }, el("span", { class: "hit-label", text: hit.label }),
+        el("span", { class: "hit-source", text: hit.source ? `Documento da equipe: ${hit.source}` : "Manual da loja" })),
+      el("div", { class: "hit-scores" }, ...scores.filter(Boolean)),
+      el("div", {}, body, el("button", { type: "button", class: "link", onclick: (e) => {
+        const open = body.classList.toggle("open");
+        e.currentTarget.textContent = open ? "Mostrar menos" : "Mostrar o trecho inteiro";
+      } }, "Mostrar o trecho inteiro"))));
+  });
+  if (!result.hits.length) rows.push(el("li", { class: "empty", text: "Nenhum trecho encontrado." }));
+  list.replaceChildren(...rows);
+  requestAnimationFrame(() => {  // the expand link only where the clamp actually hides text
+    for (const body of list.querySelectorAll(".hit-body")) {
+      if (body.scrollHeight <= body.clientHeight + 1) body.nextElementSibling?.remove();
+    }
+  });
+}
+
+function setupKnowledge() {
+  $("#kb-form").addEventListener("submit", ingest);
+  $("#kb-search").addEventListener("submit", searchKnowledge);
+  $("#kb-file").addEventListener("change", (event) => chooseFile(event.target.files[0]));
+  const drop = $("#kb-drop");
+  drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    drop.classList.remove("over");
+    chooseFile(event.dataTransfer.files[0]);
+  });
+}
+
 /* ---------------- tabs, tooltips, start-up ---------------- */
+const TABS = ["chat", "inbox", "metrics", "knowledge"];
 function showTab(name) {
-  for (const tab of ["chat", "inbox", "metrics"]) {
+  if (!TABS.includes(name)) name = "chat";
+  for (const tab of TABS) {
     $(`#tab-${tab}`).setAttribute("aria-selected", String(tab === name));
     $(`#view-${tab}`).hidden = tab !== name;
   }
   $("#clock-control").hidden = name !== "chat";  // the simulated clock only affects new messages
   if (name === "inbox") loadInbox();
   if (name === "metrics") loadMetrics();
+  if (name === "knowledge") loadKnowledge();
   const url = new URL(location.href);
   url.searchParams.set("tab", name);
   history.replaceState(null, "", url);
@@ -600,7 +869,7 @@ async function start() {
   state.session = params.get("session") || localStorage.getItem("emporio.session") || newSessionId();
   localStorage.setItem("emporio.session", state.session);
 
-  for (const tab of ["chat", "inbox", "metrics"]) $(`#tab-${tab}`).addEventListener("click", () => showTab(tab));
+  for (const tab of TABS) $(`#tab-${tab}`).addEventListener("click", () => showTab(tab));
   $("#new-chat").addEventListener("click", () => {
     state.session = newSessionId();
     localStorage.setItem("emporio.session", state.session);
@@ -633,6 +902,7 @@ async function start() {
     });
   }
   $("#refresh-metrics").addEventListener("click", loadMetrics);
+  setupKnowledge();
   setupTooltips();
 
   try {
@@ -650,7 +920,11 @@ async function start() {
   setInterval(checkHealth, 30000);
   refreshInboxCount();
   await loadSession();
+  // Links (and screenshots) can open a knowledge document and a retrieval test: ?tab=knowledge&doc=1&q=...
+  if (params.get("doc")) KB.selected = params.get("doc") === "manual" ? "manual" : Number(params.get("doc"));
+  if (params.get("q")) $("#kb-query").value = params.get("q");
   showTab(params.get("tab") || "chat");
+  if (params.get("q")) searchKnowledge();
 }
 
 start();

@@ -17,6 +17,7 @@
       <button role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="true">Conversa</button>
       <button role="tab" id="tab-inbox" aria-controls="view-inbox" aria-selected="false">Chamados <span class="count" id="inbox-count" hidden></span></button>
       <button role="tab" id="tab-metrics" aria-controls="view-metrics" aria-selected="false">Métricas</button>
+      <button role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false">Base de conhecimento</button>
     </nav>
     <!-- Test controls for whoever runs the demo; the customer's view is the chat panel only -->
     <div class="ops">
@@ -110,6 +111,51 @@
           <figcaption><h3>Verificações que mudaram uma resposta</h3><p>Cada vez que uma verificação pediu reescrita, removeu dados ou acrescentou o protocolo.</p></figcaption>
           <table class="guard-table" id="guard-table"></table>
         </figure>
+      </div>
+    </section>
+
+    <!-- Knowledge base: the store manual plus team documents, how they were split, and what a question retrieves -->
+    <section id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" class="view view-knowledge" hidden>
+      <div class="kb-side">
+        <div class="list-head"><h2>Documentos</h2></div>
+        <p class="kb-index" id="kb-index"></p>
+        <ul class="docs" id="kb-docs"></ul>
+
+        <form class="kb-add" id="kb-form" novalidate>
+          <h3>Adicionar documento</h3>
+          <p class="hint">Markdown, texto ou PDF, até 2 MB. O documento é dividido em trechos pelos títulos ou pela numeração das seções, e o Tom passa a consultá-lo junto com o manual.</p>
+          <label class="dropzone" id="kb-drop">
+            <input type="file" id="kb-file" accept=".md,.markdown,.txt,.pdf,text/markdown,text/plain,application/pdf" class="visually-hidden">
+            <span class="drop-main" id="kb-file-label">Arraste um arquivo para cá ou clique para escolher</span>
+            <span class="drop-note" id="kb-file-note"></span>
+          </label>
+          <details class="paste" id="kb-paste">
+            <summary>Ou cole o texto</summary>
+            <label class="visually-hidden" for="kb-text">Texto do documento</label>
+            <textarea id="kb-text" rows="6" maxlength="500000" placeholder="Cole aqui o texto do documento…"></textarea>
+          </details>
+          <label class="field">
+            <span>Título</span>
+            <input type="text" id="kb-title" maxlength="80" placeholder="Se ficar em branco, uso o título do arquivo">
+          </label>
+          <p class="form-error" id="kb-error" role="alert" hidden></p>
+          <button type="submit" class="primary" id="kb-submit">Indexar documento</button>
+          <ol class="steps kb-steps" id="kb-steps" aria-live="polite" hidden></ol>
+        </form>
+      </div>
+
+      <div class="kb-main">
+        <section class="panel kb-search" aria-labelledby="kb-search-title">
+          <h3 id="kb-search-title">Testar a busca</h3>
+          <p class="panel-note" id="kb-search-note">Escreva uma pergunta de cliente e veja os trechos que a busca encontra, com a posição de cada um no BM25 e nos embeddings.</p>
+          <form class="search-row" id="kb-search">
+            <label class="visually-hidden" for="kb-query">Pergunta</label>
+            <input type="search" id="kb-query" maxlength="500" placeholder="Ex.: posso trocar um violão comprado na promoção?">
+            <button type="submit" class="ghost">Buscar</button>
+          </form>
+          <ol class="hits" id="kb-hits" aria-live="polite"></ol>
+        </section>
+        <section class="panel kb-detail" id="kb-detail" aria-live="polite"></section>
       </div>
     </section>
   </main>
