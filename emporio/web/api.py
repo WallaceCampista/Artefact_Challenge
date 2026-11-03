@@ -4,11 +4,13 @@ Thin layer over ChatService, so the web, the CLI and the evals run exactly the s
 
     GET  /                          web app (chat, under-the-hood trace, team inbox, metrics)
     GET  /health                    liveness + whether the model server answers
-    GET  /api/config                model names, policy search mode, demo clocks
+    GET  /api/config                model names, policy search mode, demo clocks, whether team screens need a code
     POST /api/chat                  one turn, JSON answer
     POST /api/chat/stream           one turn as Server-Sent Events: trace events live, then the answer
     GET  /api/sessions/{id}         transcript with per-answer trace and metrics
     POST /api/feedback              thumbs up/down on an answer
+
+Team screens (need the X-Team-Token header when TEAM_TOKEN is set):
     GET  /api/handoffs              tickets for the human team (?status=open|resolved)
     POST /api/handoffs/{p}/resolve  close a ticket
     GET  /api/metrics               operational metrics from the stored conversations
@@ -18,6 +20,8 @@ Thin layer over ChatService, so the web, the CLI and the evals run exactly the s
     GET  /api/knowledge/{id}        a team document and its sections
     PATCH/DELETE /api/knowledge/{id}  turn a document on or off, or remove it (re-indexes)
     POST /api/knowledge/search      which sections a question retrieves, with each ranking
+
+The customer endpoints stay open: a session id is a random id held by the customer's browser.
 
 Answers are streamed as progress events, not token by token: the guards check the complete
 answer before the customer sees it (grounding, promotion rule, personal data), so streaming
@@ -30,9 +34,10 @@ import base64
 import binascii
 import json
 import re
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -114,6 +119,14 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
     app.state.service = service
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+    def team_only(x_team_token: str = Header(default="")) -> None:
+        """Team screens show customers' contacts and change what the agent reads."""
+        expected = settings.team_token
+        if expected and not secrets.compare_digest(x_team_token.encode(), expected.encode()):
+            raise HTTPException(401, "Área da equipe: informe o código de acesso.")
+
+    team = [Depends(team_only)]
+
     def validated_clock(value: str | None) -> str | None:
         try:
             return parse_clock(value)
@@ -141,6 +154,7 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
             "policy_search": service.policy_mode,
             "timezone": settings.timezone,
             "clocks": DEMO_CLOCKS,
+            "team_auth": bool(settings.team_token),
         }
 
     @app.post("/api/chat")
@@ -196,23 +210,23 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
             raise HTTPException(404, "answer not found")
         return {"ok": True}
 
-    @app.get("/api/handoffs")
+    @app.get("/api/handoffs", dependencies=team)
     def handoffs(status: str | None = None):
         if status not in (None, "open", "resolved"):
             raise HTTPException(422, "status must be open or resolved")
         return {"handoffs": service.desk.list(status)}
 
-    @app.post("/api/handoffs/{protocol}/resolve")
+    @app.post("/api/handoffs/{protocol}/resolve", dependencies=team)
     def resolve(protocol: str):
         if not service.desk.resolve(protocol):
             raise HTTPException(404, "no open ticket with this protocol")
         return {"ok": True}
 
-    @app.get("/api/metrics")
+    @app.get("/api/metrics", dependencies=team)
     def metrics():
         return service.analytics.summary()
 
-    @app.get("/api/knowledge")
+    @app.get("/api/knowledge", dependencies=team)
     def knowledge():
         return {
             "index": service.index_summary(),
@@ -223,7 +237,7 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
             "documents": service.knowledge.documents(),
         }
 
-    @app.post("/api/knowledge", status_code=201)
+    @app.post("/api/knowledge", status_code=201, dependencies=team)
     def add_document(upload: DocumentUpload):
         if (upload.data_base64 is None) == (upload.text is None):
             raise HTTPException(422, "Envie um arquivo ou cole um texto.")
@@ -240,11 +254,11 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
         except ValueError as exc:
             raise HTTPException(422, str(exc))
 
-    @app.get("/api/knowledge/manual")
+    @app.get("/api/knowledge/manual", dependencies=team)
     def manual_sections():
         return {"sections": [section_json(s) for s in service.manual]}
 
-    @app.get("/api/knowledge/{doc_id}")
+    @app.get("/api/knowledge/{doc_id}", dependencies=team)
     def document(doc_id: int):
         found = service.knowledge.document(doc_id, with_sections=True)
         if found is None:
@@ -252,21 +266,21 @@ def create_app(settings: Settings | None = None, service: ChatService | None = N
         found["section_list"] = [section_json(s) for s in found["section_list"]]
         return found
 
-    @app.patch("/api/knowledge/{doc_id}")
+    @app.patch("/api/knowledge/{doc_id}", dependencies=team)
     def update_document(doc_id: int, update: DocumentUpdate):
         result = service.set_document_active(doc_id, update.active)
         if result is None:
             raise HTTPException(404, "document not found")
         return result
 
-    @app.delete("/api/knowledge/{doc_id}")
+    @app.delete("/api/knowledge/{doc_id}", dependencies=team)
     def delete_document(doc_id: int):
         result = service.remove_document(doc_id)
         if result is None:
             raise HTTPException(404, "document not found")
         return result
 
-    @app.post("/api/knowledge/search")
+    @app.post("/api/knowledge/search", dependencies=team)
     def search(request: SearchRequest):
         hits = service.search_policies(request.query, request.k)
         return {

@@ -63,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         from .web.api import create_app
 
         print(f"Empório da Música web app on http://{args.host}:{args.port}  (model: {settings.llm_model})")
+        if args.host not in ("127.0.0.1", "localhost", "::1") and not settings.team_token:
+            print("Warning: the team screens (tickets with customer contacts, metrics, knowledge base) are open to "
+                  "anyone who can reach this port. Set TEAM_TOKEN to require an access code.")
         uvicorn.run(create_app(settings), host=args.host, port=args.port, log_level="warning")
         return 0
 

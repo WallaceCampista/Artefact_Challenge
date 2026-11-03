@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 import pytest
@@ -54,6 +55,25 @@ def test_chat_persists_and_returns_trace(client, service):
     assert service.clocks == ["2026-11-01T10:00:00"]
     messages = client.get("/api/sessions/web-1").json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"] and messages[1]["trace"]
+
+
+def test_team_screens_need_the_access_code_when_one_is_set(service):
+    assert TestClient(create_app(service=service)).get("/api/config").json()["team_auth"] is False
+    service.settings = dataclasses.replace(service.settings, team_token="codigo-de-teste")
+    client = TestClient(create_app(service=service))
+    assert client.get("/api/config").json()["team_auth"] is True
+    team_calls = [("GET", "/api/handoffs"), ("POST", "/api/handoffs/EM-20261103-0001/resolve"), ("GET", "/api/metrics"),
+                  ("GET", "/api/knowledge"), ("GET", "/api/knowledge/manual"), ("DELETE", "/api/knowledge/1")]
+    for method, path in team_calls:
+        assert client.request(method, path).status_code == 401, path
+        assert client.request(method, path, headers={"X-Team-Token": "outro"}).status_code == 401, path
+    right = {"X-Team-Token": "codigo-de-teste"}
+    assert client.get("/api/handoffs", headers=right).status_code == 200
+    assert client.get("/api/metrics", headers=right).status_code == 200
+    # The customer's side stays open: chat, own transcript, thumbs up or down.
+    reply = client.post("/api/chat", json={"session_id": "web-9", "message": "oi"}).json()
+    assert client.get("/api/sessions/web-9").status_code == 200
+    assert client.post("/api/feedback", json={"message_id": reply["message_id"], "rating": "up"}).status_code == 200
 
 
 def test_stream_sends_trace_events_then_the_answer(client):

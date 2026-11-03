@@ -114,6 +114,21 @@
       </div>
     </section>
 
+    <!-- Shown instead of a team screen when the server requires an access code (TEAM_TOKEN) -->
+    <section id="view-locked" role="tabpanel" class="view view-locked" hidden>
+      <form class="lock" id="team-form" autocomplete="off">
+        <h2>Área da equipe</h2>
+        <p>Chamados, métricas e a base de conhecimento mostram contatos de clientes e mudam o que o Tom consulta. Digite o código de acesso da equipe para continuar.</p>
+        <label class="field">
+          <span>Código de acesso</span>
+          <input type="password" id="team-code" autocomplete="current-password">
+        </label>
+        <p class="form-error" id="team-error" role="alert" hidden></p>
+        <button type="submit" class="primary">Entrar</button>
+        <p class="hint">O código fica guardado só nesta aba do navegador.</p>
+      </form>
+    </section>
+
     <!-- Knowledge base: the store manual plus team documents, how they were split, and what a question retrieves -->
     <section id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" class="view view-knowledge" hidden>
       <div class="kb-side">

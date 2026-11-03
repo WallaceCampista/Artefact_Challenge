@@ -74,7 +74,16 @@ const state = {
   busy: false,
   inboxStatus: "open",
   ticket: null,
+  tab: "chat",
 };
+// Team screens: when the server sets TEAM_TOKEN, they need the access code. It lives in this tab only.
+const TEAM_TABS = ["inbox", "metrics", "knowledge"];
+const team = { token: sessionStorage.getItem("emporio.teamToken") || "", wanted: "inbox" };
+const teamLocked = () => Boolean(state.config && state.config.team_auth) && !team.token;
+function forgetTeamToken() {
+  team.token = "";
+  sessionStorage.removeItem("emporio.teamToken");
+}
 
 /* ---------------- helpers ---------------- */
 function escapeHtml(text) {
@@ -114,10 +123,18 @@ function newSessionId() {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const headers = { "Content-Type": "application/json" };
+  if (team.token) headers["X-Team-Token"] = team.token;
+  const response = await fetch(path, { headers, ...options });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(typeof body.detail === "string" ? body.detail : `a requisição falhou (${response.status})`);
+    if (response.status === 401) {  // wrong or changed access code: back to the code screen
+      forgetTeamToken();
+      if (TEAM_TABS.includes(state.tab) && $("#view-locked").hidden) showTab(state.tab);
+    }
+    const error = new Error(typeof body.detail === "string" ? body.detail : `a requisição falhou (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -440,6 +457,7 @@ function formatDate(iso) {
 }
 
 async function refreshInboxCount() {
+  if (teamLocked()) return;
   try {
     const { handoffs } = await api("/api/handoffs?status=open");
     const badge = $("#inbox-count");
@@ -825,14 +843,22 @@ function setupKnowledge() {
 const TABS = ["chat", "inbox", "metrics", "knowledge"];
 function showTab(name) {
   if (!TABS.includes(name)) name = "chat";
+  state.tab = name;
+  const locked = TEAM_TABS.includes(name) && teamLocked();
   for (const tab of TABS) {
     $(`#tab-${tab}`).setAttribute("aria-selected", String(tab === name));
-    $(`#view-${tab}`).hidden = tab !== name;
+    $(`#view-${tab}`).hidden = tab !== name || locked;
   }
+  $("#view-locked").hidden = !locked;
   $("#clock-control").hidden = name !== "chat";  // the simulated clock only affects new messages
-  if (name === "inbox") loadInbox();
-  if (name === "metrics") loadMetrics();
-  if (name === "knowledge") loadKnowledge();
+  if (locked) {
+    team.wanted = name;
+    $("#view-locked").setAttribute("aria-labelledby", `tab-${name}`);
+    $("#team-code").focus();
+  }
+  if (!locked && name === "inbox") loadInbox();
+  if (!locked && name === "metrics") loadMetrics();
+  if (!locked && name === "knowledge") loadKnowledge();
   const url = new URL(location.href);
   url.searchParams.set("tab", name);
   history.replaceState(null, "", url);
@@ -869,6 +895,28 @@ async function checkHealth() {
     status.className = "model-status down";
     $("#model-label").textContent = "API fora do ar";
   }
+}
+
+async function unlockTeam(event) {
+  event.preventDefault();
+  const input = $("#team-code");
+  const error = $("#team-error");
+  if (!input.value.trim()) return;
+  team.token = input.value.trim();
+  try {
+    await api("/api/handoffs?status=open");  // any team call checks the code
+  } catch (failure) {
+    forgetTeamToken();
+    error.textContent = failure.status === 401 ? "Código incorreto. Confira o valor de TEAM_TOKEN no servidor." : `Não foi possível conferir o código: ${failure.message}`;
+    error.hidden = false;
+    input.select();
+    return;
+  }
+  sessionStorage.setItem("emporio.teamToken", team.token);
+  input.value = "";
+  error.hidden = true;
+  refreshInboxCount();
+  showTab(team.wanted);
 }
 
 async function start() {
@@ -909,6 +957,7 @@ async function start() {
     });
   }
   $("#refresh-metrics").addEventListener("click", loadMetrics);
+  $("#team-form").addEventListener("submit", unlockTeam);
   setupKnowledge();
   setupTooltips();
 
