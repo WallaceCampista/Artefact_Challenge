@@ -9,9 +9,11 @@ Design notes
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Callable
@@ -166,6 +168,7 @@ class ToolBox:
         self.clock = clock  # store-local "now"; a callable so long-running processes stay correct
         self.session_id: str | None = None
         self.schemas = tool_schemas([c.name for c in store.categories.values()])
+        self._base_schemas = copy.deepcopy(self.schemas)
         self._handlers = {
             "buscar_produtos": self.buscar_produtos,
             "detalhes_produto": self.detalhes_produto,
@@ -388,10 +391,32 @@ class ToolBox:
         result.update(order_deadlines(order, self.today))
         return result
 
+    def use_policies(self, policies: PolicyIndex, documents: Sequence[str] = ()) -> None:
+        """Swaps the policy index after team documents change, and names those documents in the
+        consultar_politicas description so the model knows their topics belong to that tool.
+        Both are replaced whole, so a turn in progress never sees a half-updated schema."""
+        schemas = copy.deepcopy(self._base_schemas)
+        if documents:
+            tool = next(s["function"] for s in schemas if s["function"]["name"] == "consultar_politicas")
+            tool["description"] += (" Também consulta documentos da equipe sobre: " + "; ".join(documents)
+                                    + ". Para esses assuntos, chame a ferramenta antes de responder.")
+        self.policies, self.schemas = policies, schemas
+
+    def team_document_for(self, question: str) -> str | None:
+        """The team document holding the best section for this question, if the best section is from
+        one and shares words with the question (an embedding match alone is too loose to act on)."""
+        if not any(s.source for s in self.policies.sections):
+            return None
+        best = self.policies.explain(question, k=1)
+        if best and best[0].section.source and best[0].bm25_rank is not None:
+            return best[0].section.source
+        return None
+
     def consultar_politicas(self, pergunta: str, **_ignored) -> dict:
         sections = self.policies.search(str(pergunta), k=3)
         return {
-            "trechos": [{"secao": s.label, "texto": s.body} for s in sections],
+            "trechos": [{"secao": s.label, **({"fonte": s.source} if s.source else {}), "texto": s.body}
+                        for s in sections],
             "observacao": "Responda só com base nestes trechos. Se eles não respondem a dúvida, diga que vai "
                           "confirmar com a equipe.",
         }

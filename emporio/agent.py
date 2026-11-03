@@ -305,6 +305,12 @@ class Agent:
             if product is not None:
                 self._prefetch(messages, reply, "detalhes_produto", {"produto": product.name},
                                reason="pre-routing: payment question about the product in focus")
+        # Team documents (knowledge base) cover topics the prompt never mentions; tested live, the
+        # model answered from the document's title in the tool description instead of calling the
+        # tool. When the best section for the question comes from one of them, read it for the model.
+        if self.tools.team_document_for(message):
+            self._prefetch(messages, reply, "consultar_politicas", {"pergunta": message},
+                           reason="pre-routing: question about a team document")
 
         text = self._loop(messages, reply)
         for attempt in range(GROUNDING_RETRIES + 1):

@@ -41,6 +41,9 @@ class FakeTools:
     def run(self, name, arguments):
         return ToolCall(name, json.loads(arguments), {"preco_final": "R$ 2.199,00"}, 1.0)
 
+    def team_document_for(self, question):
+        return None  # no knowledge base documents in these tests
+
 
 def test_tool_result_goes_back_to_the_model_before_the_answer():
     client = FakeClient([tool_message("detalhes_produto", {"produto": "Takamine GD20"}),
