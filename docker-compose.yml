@@ -1,0 +1,24 @@
+# docker compose up --build   ->  http://localhost:8000
+# LM Studio keeps running on the host (port 1234); the container reaches it through
+# host.docker.internal. To use OpenAI instead, export LLM_BASE_URL, LLM_API_KEY,
+# LLM_MODEL and EMBEDDING_MODEL before running compose.
+services:
+  tom:
+    build: .
+    image: emporio-tom
+    ports:
+      - "8000:8000"
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-lm-studio}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-7b-instruct}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL-text-embedding-qwen3-embedding-0.6b}
+      STORE_TIMEZONE: ${STORE_TIMEZONE:-America/Campo_Grande}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # needed on Linux, harmless on Mac/Windows
+    volumes:
+      - tom-var:/app/var                      # conversations, tickets, metrics, embedding cache
+    restart: unless-stopped
+
+volumes:
+  tom-var:
